@@ -1,11 +1,19 @@
+import os
 import telebot
+from flask import Flask, request
 
-# Ваш токен вставляется вот сюда, внутрь кавычек:
-TOKEN = '8991667352:AAH8RamfY--K1CSNM62H1bLW8bYYIjc_n_c'
+TOKEN = os.environ.get('TG_TOKEN')
 bot = telebot.TeleBot(TOKEN)
+app = Flask(__name__)
 
-@bot.message_handler(commands=['start'])
-def send_welcome(message):
-    bot.reply_to(message, "Привет! Я бот для Brest_TALK, и я успешно запущен!")
+@app.route('/' + TOKEN, methods=['POST'])
+def webhook():
+    json_str = request.get_data().decode('UTF-8')
+    update = telebot.types.Update.de_json(json_str)
+    bot.process_new_updates([update])
+    return '!', 200
 
-bot.infinity_polling()
+if __name__ == "__main__":
+    bot.remove_webhook()
+    bot.set_webhook(url=os.environ.get('RENDER_EXTERNAL_URL') + '/' + TOKEN)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
