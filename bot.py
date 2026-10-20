@@ -1,11 +1,11 @@
-import os
+Import os
 import json
 import telebot
 from flask import Flask, request
 from google import genai
 from google.genai import types
 
-TOKEN = os.environ.get('TG_TOKEN')
+TOKEN = os.environ.get('BOT_TOKEN')
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 
 bot = telebot.TeleBot(TOKEN)
@@ -65,4 +65,3 @@ if __name__ == "__main__":
     bot.remove_webhook()
     bot.set_webhook(url=os.environ.get('RENDER_EXTERNAL_URL') + '/' + TOKEN)
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
-
