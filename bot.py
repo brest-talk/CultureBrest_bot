@@ -22,6 +22,12 @@ SYSTEM_INSTRUCTION = """Ты — уважаемый старожил, котор
 Всегда давай развёрнутые, глубокие, философские ответы.
 """
 
+# ID группы, куда пересылаются материалы из лички
+FORWARD_CHAT_ID = -1004392588464
+
+# ID групп, в которых боту разрешено общаться
+ALLOWED_GROUP_IDS = [-1004392588464, -1003555258619]
+
 def load_history(chat_id):
     filename = f"history_{chat_id}.json"
     if os.path.exists(filename):
@@ -39,49 +45,68 @@ def webhook():
     json_str = request.get_data().decode('UTF-8')
     update = telebot.types.Update.de_json(json_str)
 
-    if update.message and update.message.text:
+    if update.message:
         chat_id = update.message.chat.id
         chat_type = update.message.chat.type
-        user_text = update.message.text
         message = update.message
 
+        # ЛОГИКА ДЛЯ ЛИЧНЫХ СООБЩЕНИЙ
         if chat_type == 'private':
+            if message.text == '/start':
+                bot.send_message(chat_id, "Приветствую! Я готов принять ваши материалы для редактирования. Отправьте фото или текст, и я бережно передам их в журнал.")
+            else:
+                # Пересылаем любое сообщение (текст, фото, видео и т.д.) в закрытую группу
+                bot.forward_message(FORWARD_CHAT_ID, chat_id, message.message_id)
+                bot.send_message(chat_id, "Материалы получены и отправлены в редакцию!")
             return '!', 200
         
-        is_reply_to_bot = (
-            message.reply_to_message and 
-            message.reply_to_message.from_user.id == bot.get_me().id
-        )
-        
-        bot_username = f"@{bot.get_me().username}"
-        is_mentioned = bot_username.lower() in user_text.lower()
+        # ЛОГИКА ДЛЯ ГРУПП
+        if chat_type in ['group', 'supergroup']:
+            # Проверяем, разрешено ли боту отвечать в этой группе
+            if chat_id not in ALLOWED_GROUP_IDS:
+                return '!', 200
 
-        if not is_reply_to_bot and not is_mentioned:
-            return '!', 200
+            # Получаем текст (или подпись к фото)
+            user_text = message.text or message.caption
+            if not user_text:
+                return '!', 200
+            
+            is_reply_to_bot = (
+                message.reply_to_message and 
+                message.reply_to_message.from_user.id == bot.get_me().id
+            )
+            
+            bot_username = f"@{bot.get_me().username}"
+            is_mentioned = bot_username.lower() in user_text.lower()
 
-        history_data = load_history(chat_id)
+            # Если боту не ответили напрямую и не упомянули его — он молчит
+            if not is_reply_to_bot and not is_mentioned:
+                return '!', 200
 
-        chat = client.chats.create(
-            model="gemini-3.8-flash",
-            config=types.GenerateContentConfig(
-                system_instruction=SYSTEM_INSTRUCTION
-            ),
-            history=history_data
-        )
+            # Нейросеть отвечает только если пройдены все проверки выше
+            history_data = load_history(chat_id)
 
-        gemini_response = chat.send_message(user_text).text
-        bot.send_message(chat_id, gemini_response)
+            chat = client.chats.create(
+                model="gemini-3.8-flash",
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_INSTRUCTION
+                ),
+                history=history_data
+            )
 
-        new_history = []
-        for msg in chat.get_history():
-            new_history.append({
-                "role": msg.role,
-                "parts": [{"text": part.text} for part in msg.parts]
-            })
-        save_history(chat_id, new_history)
+            gemini_response = chat.send_message(user_text).text
+            bot.send_message(chat_id, gemini_response)
+
+            # Сохраняем историю
+            new_history = []
+            for msg in chat.get_history():
+                new_history.append({
+                    "role": msg.role,
+                    "parts": [{"text": part.text} for part in msg.parts]
+                })
+            save_history(chat_id, new_history)
 
     return '!', 200
-
 
 if __name__ == "__main__":
     bot.remove_webhook()
