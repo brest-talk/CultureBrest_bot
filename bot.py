@@ -46,7 +46,7 @@ def webhook():
         history_data = load_history(chat_id)
 
         chat = client.chats.create(
-            model="gemini-1.5-flash",
+            model="gemini-3.8-flash",
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_INSTRUCTION
             ),
