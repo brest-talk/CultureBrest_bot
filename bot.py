@@ -41,20 +41,21 @@ def webhook():
 
     if update.message and update.message.text:
         chat_id = update.message.chat.id
+        chat_type = update.message.chat.type
         user_text = update.message.text
         message = update.message
+
+        if chat_type == 'private':
+            return '!', 200
         
-        # Проверяем, ответили ли на сообщение бота
         is_reply_to_bot = (
             message.reply_to_message and 
             message.reply_to_message.from_user.id == bot.get_me().id
         )
         
-        # Проверяем, упомянули ли бота через @username
         bot_username = f"@{bot.get_me().username}"
         is_mentioned = bot_username.lower() in user_text.lower()
 
-        # Если это не ответ боту и не упоминание, игнорируем
         if not is_reply_to_bot and not is_mentioned:
             return '!', 200
 
