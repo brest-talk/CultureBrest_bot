@@ -42,6 +42,21 @@ def webhook():
     if update.message and update.message.text:
         chat_id = update.message.chat.id
         user_text = update.message.text
+        message = update.message
+        
+        # Проверяем, ответили ли на сообщение бота
+        is_reply_to_bot = (
+            message.reply_to_message and 
+            message.reply_to_message.from_user.id == bot.get_me().id
+        )
+        
+        # Проверяем, упомянули ли бота через @username
+        bot_username = f"@{bot.get_me().username}"
+        is_mentioned = bot_username.lower() in user_text.lower()
+
+        # Если это не ответ боту и не упоминание, игнорируем
+        if not is_reply_to_bot and not is_mentioned:
+            return '!', 200
 
         history_data = load_history(chat_id)
 
