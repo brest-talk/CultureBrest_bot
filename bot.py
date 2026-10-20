@@ -57,7 +57,7 @@ def process_ai_response(chat_id, message_id, message, contents, chat_type):
     )
     
     gemini_response = chat.send_message(contents).text
-    time.sleep(3)
+    time.sleep(7)
 
     if chat_type == 'channel':
         bot.send_message(chat_id, gemini_response)
