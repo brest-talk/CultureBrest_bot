@@ -13,12 +13,12 @@ bot = telebot.TeleBot(TOKEN)
 client = genai.Client(api_key=GEMINI_API_KEY)
 app = Flask(__name__)
 
-# Полный системный промпт с ролями и правилами
+# Полный системный промпт с актуальными ID и ролями
 SYSTEM_INSTRUCTION = """Ты — уважаемый старожил, опытный редактор и профессиональный фотограф с огромным жизненным опытом. Ты знаешь всё и обо всех. Твой стиль — вдумчивый, проницательный и авторитетный. Твой тон — слегка ироничный, рассудительный и спокойный, без лишней эмоциональности. Ты используешь богатый, красивый русский язык. Строго никаких смайликов и эмодзи.
 
-Место твоей работы — Группа (ID: -1004415639090) и Канал (ID: -1003555258619). Твоя модель поведения меняется в зависимости от места публикации:
+Твоя модель поведения меняется в зависимости от места публикации (ID чата):
 
-1. ПОВЕДЕНИЕ В ГРУППЕ (ID: -1004415639090):
+1. ПОВЕДЕНИЕ В ГРУППЕ Brest_TALK (ID: -1004415639090) И ПЕСОЧНИЦЕ (ID: -1004392588464):
 * Базовое общение и сложные вопросы: Если пользователи задают вопросы об искусстве, жизни или просят совета — давай развёрнутые, глубокие, философские ответы. Делись житейской мудростью, поддерживая репутацию всезнающего эксперта.
 * ОЦЕНКА КОНКУРСНЫХ ФОТО (Триггер: хештег #конкурс):
   * Текущая тема: «Краски осени».
@@ -27,15 +27,15 @@ SYSTEM_INSTRUCTION = """Ты — уважаемый старожил, опытн
   * Если фото слабое: Мягко укажи на главную техническую ошибку, но обязательно резюмируй: «Работа принята на конкурс».
   * Если фото не по теме: Со свойственной тебе легкой иронией укажи на несоответствие (например: «Работа принята на конкурс. Но где же здесь осенние краски? Вижу только жаркое лето.»), обязательно сохранив участие.
 
-2. ПОВЕДЕНИЕ В КАНАЛЕ (ID: -1003555258619):
+2. ПОВЕДЕНИЕ В КАНАЛЕ Калейдоскоп (ID: -1003555258619):
 * Переключайся в режим харизматичного репортера, сохраняя свой авторитет старожила.
 * Пиши посты ярко, литературно, с глубоким смыслом и вовлекающей подачей. Твоя задача — удерживать внимание аудитории как профессиональный писатель и куратор."""
 
-# ID группы, куда пересылаются материалы из лички для отбора
+# ID чата-песочницы, куда пересылаются материалы из лички для отбора
 FORWARD_CHAT_ID = -1004392588464
 
-# ID групп и каналов, в которых боту разрешено общаться
-ALLOWED_GROUP_IDS = [-1004415639090, -1003555258619]
+# ВСЕ ID, где боту разрешено общаться (Группа, Песочница, Канал)
+ALLOWED_GROUP_IDS = [-1004415639090, -1004392588464, -1003555258619]
 
 def load_history(chat_id):
     filename = f"history_{chat_id}.json"
@@ -59,68 +59,87 @@ def webhook():
         chat_type = update.message.chat.type
         message = update.message
 
-        # ЛОГИКА ДЛЯ ЛИЧНЫХ СООБЩЕНИЙ (сбор предложки)
+        # ЛОГИКА ДЛЯ ЛИЧНЫХ СООБЩЕНИЙ (сбор предложки от юзеров)
         if chat_type == 'private':
             if message.text == '/start':
-                bot.send_message(chat_id, "Приветствую. Я готов принять ваши материалы. Отправьте фото или текст, и я передам их куда следует.")
+                bot.send_message(chat_id, "Приветствую. Я готов принять ваши материалы. Отправьте фото или текст, и я передам их в редакцию.")
             else:
-                # Пересылаем в закрытую группу для отбора
                 bot.forward_message(FORWARD_CHAT_ID, chat_id, message.message_id)
-                bot.send_message(chat_id, "Материалы получены и отправлены в редакцию.")
+                bot.send_message(chat_id, "Материалы получены и направлены редактору.")
             return '!', 200
         
         # ЛОГИКА ДЛЯ ГРУПП И КАНАЛОВ
-        if chat_type in ['group', 'supergroup']:
-            # Проверяем, разрешено ли боту отвечать в этой группе
+        if chat_type in ['group', 'supergroup', 'channel']:
+            # Проверка прав доступа по ID чата
             if chat_id not in ALLOWED_GROUP_IDS:
                 return '!', 200
 
-            user_text = message.text or message.caption
-            if not user_text:
-                return '!', 200
+            user_text = message.text or message.caption or ""
             
-            # Проверка триггеров: реплай боту, упоминание бота, или наличие хештега
-            is_reply_to_bot = (
-                message.reply_to_message and 
-                message.reply_to_message.from_user.id == bot.get_me().id
-            )
-            bot_username = f"@{bot.get_me().username}".lower()
-            is_mentioned = bot_username in user_text.lower()
-            is_contest = "#конкурс" in user_text.lower()
+            # В каналах нет реплаев боту, поэтому если это канал — просто реагируем (если нужно)
+            # Но для групп проверяем триггеры
+            if chat_type != 'channel':
+                is_reply_to_bot = (
+                    message.reply_to_message and 
+                    message.reply_to_message.from_user.id == bot.get_me().id
+                )
+                bot_username = f"@{bot.get_me().username}".lower()
+                is_mentioned = bot_username in user_text.lower()
+                is_contest = "#конкурс" in user_text.lower()
 
-            # Если боту не ответили напрямую, не упомянули его и это не конкурс — он молчит
-            if not (is_reply_to_bot or is_mentioned or is_contest):
-                return '!', 200
+                if not (is_reply_to_bot or is_mentioned or is_contest):
+                    return '!', 200
 
-            # Включаем статус "Печатает..." для эффекта живого присутствия
+            # Включаем статус "Печатает..." для реалистичности
             bot.send_chat_action(chat_id, 'typing')
             
-            # Загружаем историю и создаем чат с Gemini
+            contents = []
+            if user_text:
+                contents.append(user_text)
+            else:
+                contents.append("Взгляни на это.")
+
+            # Обработка картинки (чтобы Gemini её увидел)
+            if message.photo:
+                file_info = bot.get_file(message.photo[-1].file_id)
+                downloaded_file = bot.download_file(file_info.file_path)
+                image_part = types.Part.from_bytes(
+                    data=downloaded_file,
+                    mime_type='image/jpeg'
+                )
+                contents.append(image_part)
+
+            # Создание чата с ИИ
             history_data = load_history(chat_id)
             chat = client.chats.create(
-                model="gemini-1.5-flash", # Используем актуальную и быструю модель
+                model="gemini-1.5-flash",
                 config=types.GenerateContentConfig(
                     system_instruction=SYSTEM_INSTRUCTION
                 ),
                 history=history_data
             )
             
-            # Получаем ответ от нейросети
-            gemini_response = chat.send_message(user_text).text
+            # Получение ответа
+            gemini_response = chat.send_message(contents).text
 
-            # Выдерживаем реалистичную паузу в 3 секунды
+            # Пауза 3 секунды
             time.sleep(3)
 
-            # Отправляем ответ в чат, отвечая на конкретное сообщение пользователя
-            bot.reply_to(message, gemini_response)
+            # Отправка ответа
+            if chat_type == 'channel':
+                bot.send_message(chat_id, gemini_response)
+            else:
+                bot.reply_to(message, gemini_response)
 
-            # Сохраняем историю контекста для будущих сообщений
+            # Сохранение текстовой истории
             new_history = []
             for msg in chat.get_history():
-                new_history.append({
-                    "role": msg.role,
-                    "parts": [{"text": part.text} for part in msg.parts]
-                })
+                text_parts = [part.text for part in msg.parts if part.text]
+                if text_parts:
+                    new_history.append({
+                        "role": msg.role,
+                        "parts": [{"text": "\n".join(text_parts)}]
+                    })
             save_history(chat_id, new_history)
 
     return '!', 200
