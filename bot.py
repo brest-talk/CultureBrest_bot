@@ -49,7 +49,7 @@ def save_history(chat_id, history):
 def process_ai_response(chat_id, message_id, message, contents, chat_type):
     history_data = load_history(chat_id)
     chat = client.chats.create(
-        model="gemini-1.5-flash",
+        model="gemini-3.8-flash",
         config=types.GenerateContentConfig(
             system_instruction=SYSTEM_INSTRUCTION
         ),
