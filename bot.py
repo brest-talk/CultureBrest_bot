@@ -3,6 +3,7 @@ import json
 import time
 import telebot
 from flask import Flask, request
+from threading import Thread
 from google import genai
 from google.genai import types
 
@@ -13,10 +14,9 @@ bot = telebot.TeleBot(TOKEN)
 client = genai.Client(api_key=GEMINI_API_KEY)
 app = Flask(__name__)
 
-# Полный системный промпт с актуальными ID и ролями
 SYSTEM_INSTRUCTION = """Ты — уважаемый старожил, опытный редактор и профессиональный фотограф с огромным жизненным опытом. Ты знаешь всё и обо всех. Твой стиль — вдумчивый, проницательный и авторитетный. Твой тон — слегка ироничный, рассудительный и спокойный, без лишней эмоциональности. Ты используешь богатый, красивый русский язык. Строго никаких смайликов и эмодзи.
 
-Твоя модель поведения меняется в зависимости от места публикации (ID чата):
+Твоя модель поведения меняется в зависимости от места публикации:
 
 1. ПОВЕДЕНИЕ В ГРУППЕ Brest_TALK (ID: -1004415639090) И ПЕСОЧНИЦЕ (ID: -1004392588464):
 * Базовое общение и сложные вопросы: Если пользователи задают вопросы об искусстве, жизни или просят совета — давай развёрнутые, глубокие, философские ответы. Делись житейской мудростью, поддерживая репутацию всезнающего эксперта.
@@ -31,10 +31,7 @@ SYSTEM_INSTRUCTION = """Ты — уважаемый старожил, опытн
 * Переключайся в режим харизматичного репортера, сохраняя свой авторитет старожила.
 * Пиши посты ярко, литературно, с глубоким смыслом и вовлекающей подачей. Твоя задача — удерживать внимание аудитории как профессиональный писатель и куратор."""
 
-# ID чата-песочницы, куда пересылаются материалы из лички для отбора
 FORWARD_CHAT_ID = -1004392588464
-
-# ВСЕ ID, где боту разрешено общаться (Группа, Песочница, Канал)
 ALLOWED_GROUP_IDS = [-1004415639090, -1004392588464, -1003555258619]
 
 def load_history(chat_id):
@@ -49,6 +46,34 @@ def save_history(chat_id, history):
     with open(filename, "w", encoding="utf-8") as f:
         json.dump(history, f, ensure_ascii=False)
 
+def process_ai_response(chat_id, message_id, message, contents, chat_type):
+    history_data = load_history(chat_id)
+    chat = client.chats.create(
+        model="gemini-1.5-flash",
+        config=types.GenerateContentConfig(
+            system_instruction=SYSTEM_INSTRUCTION
+        ),
+        history=history_data
+    )
+    
+    gemini_response = chat.send_message(contents).text
+    time.sleep(3)
+
+    if chat_type == 'channel':
+        bot.send_message(chat_id, gemini_response)
+    else:
+        bot.reply_to(message, gemini_response)
+
+    new_history = []
+    for msg in chat.get_history():
+        text_parts = [part.text for part in msg.parts if part.text]
+        if text_parts:
+            new_history.append({
+                "role": msg.role,
+                "parts": [{"text": "\n".join(text_parts)}]
+            })
+    save_history(chat_id, new_history)
+
 @app.route('/' + TOKEN, methods=['POST'])
 def webhook():
     json_str = request.get_data().decode('UTF-8')
@@ -59,7 +84,6 @@ def webhook():
         chat_type = update.message.chat.type
         message = update.message
 
-        # ЛОГИКА ДЛЯ ЛИЧНЫХ СООБЩЕНИЙ (сбор предложки от юзеров)
         if chat_type == 'private':
             if message.text == '/start':
                 bot.send_message(chat_id, "Приветствую. Я готов принять ваши материалы. Отправьте фото или текст, и я передам их в редакцию.")
@@ -68,16 +92,12 @@ def webhook():
                 bot.send_message(chat_id, "Материалы получены и направлены редактору.")
             return '!', 200
         
-        # ЛОГИКА ДЛЯ ГРУПП И КАНАЛОВ
         if chat_type in ['group', 'supergroup', 'channel']:
-            # Проверка прав доступа по ID чата
             if chat_id not in ALLOWED_GROUP_IDS:
                 return '!', 200
 
             user_text = message.text or message.caption or ""
             
-            # В каналах нет реплаев боту, поэтому если это канал — просто реагируем (если нужно)
-            # Но для групп проверяем триггеры
             if chat_type != 'channel':
                 is_reply_to_bot = (
                     message.reply_to_message and 
@@ -90,7 +110,6 @@ def webhook():
                 if not (is_reply_to_bot or is_mentioned or is_contest):
                     return '!', 200
 
-            # Включаем статус "Печатает..." для реалистичности
             bot.send_chat_action(chat_id, 'typing')
             
             contents = []
@@ -99,48 +118,17 @@ def webhook():
             else:
                 contents.append("Взгляни на это.")
 
-            # Обработка картинки (чтобы Gemini её увидел)
             if message.photo:
                 file_info = bot.get_file(message.photo[-1].file_id)
                 downloaded_file = bot.download_file(file_info.file_path)
-                image_part = types.Part.from_bytes(
+                image_parts = types.Part.from_bytes(
                     data=downloaded_file,
                     mime_type='image/jpeg'
                 )
-                contents.append(image_part)
+                contents.append(image_parts)
 
-            # Создание чата с ИИ
-            history_data = load_history(chat_id)
-            chat = client.chats.create(
-                model="gemini-1.5-flash",
-                config=types.GenerateContentConfig(
-                    system_instruction=SYSTEM_INSTRUCTION
-                ),
-                history=history_data
-            )
-            
-            # Получение ответа
-            gemini_response = chat.send_message(contents).text
-
-            # Пауза 3 секунды
-            time.sleep(3)
-
-            # Отправка ответа
-            if chat_type == 'channel':
-                bot.send_message(chat_id, gemini_response)
-            else:
-                bot.reply_to(message, gemini_response)
-
-            # Сохранение текстовой истории
-            new_history = []
-            for msg in chat.get_history():
-                text_parts = [part.text for part in msg.parts if part.text]
-                if text_parts:
-                    new_history.append({
-                        "role": msg.role,
-                        "parts": [{"text": "\n".join(text_parts)}]
-                    })
-            save_history(chat_id, new_history)
+            thread = Thread(target=process_ai_response, args=(chat_id, message.message_id, message, contents, chat_type))
+            thread.start()
 
     return '!', 200
 
