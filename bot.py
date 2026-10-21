@@ -10,6 +10,10 @@ from google.genai import types
 TOKEN = os.environ.get('BOT_TOKEN')
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 
+CHANNEL_ID = -1003555258619
+CHANNEL_USERNAME = "kaleidoscope_brest"
+BREST_TALK_ID = -1004415639090
+
 bot = telebot.TeleBot(TOKEN)
 client = genai.Client(api_key=GEMINI_API_KEY)
 app = Flask(__name__)
@@ -31,7 +35,6 @@ SYSTEM_INSTRUCTION = """Ты — уважаемый старожил, опытн
 * Переключайся в режим харизматичного репортера, сохраняя свой авторитет старожила.
 * Пиши посты ярко, литературно, с глубоким смыслом и вовлекающей подачей. Твоя задача — удерживать внимание аудитории как профессиональный писатель и куратор."""
 
-
 FORWARD_CHAT_ID = -1004392588464
 ALLOWED_GROUP_IDS = [-1004415639090, -1004392588464, -1003555258619]
 
@@ -46,6 +49,59 @@ def save_history(chat_id, history):
     filename = f"history_{chat_id}.json"
     with open(filename, "w", encoding="utf-8") as f:
         json.dump(history, f, ensure_ascii=False)
+
+def get_forward_info(message):
+    if getattr(message, 'forward_from_chat', None):
+        return message.forward_from_chat.id, getattr(message, 'forward_from_message_id', None)
+    origin = getattr(message, 'forward_origin', None)
+    if origin and getattr(origin, 'type', '') == 'channel':
+        chat = getattr(origin, 'chat', None)
+        chat_id = getattr(chat, 'id', None) if chat else None
+        msg_id = getattr(origin, 'message_id', None)
+        return chat_id, msg_id
+    return None, None
+
+def process_channel_forward(chat_id, message, orig_msg_id):
+    post_text = message.text or message.caption or "Новая публикация в канале."
+
+    # 1. Мгновенно удаляем прилетевший длинный дубликат из чата
+    try:
+        bot.delete_message(chat_id, message.message_id)
+    except Exception as e:
+        print(f"Не удалось удалить дубликат поста: {e}")
+
+    # 2. Формируем ссылку на оригинальный пост в канале
+    if orig_msg_id:
+        post_link = f"https://t.me/{CHANNEL_USERNAME}/{orig_msg_id}"
+    else:
+        post_link = f"https://t.me/{CHANNEL_USERNAME}"
+
+    # 3. Генерируем лаконичную тезисную выжимку
+    prompt = (
+        f"Текст публикации из канала:\n«{post_text}»\n\n"
+        f"Сформулируй краткую тезисную выжимку сути (1–2 предложения) "
+        f"и пригласи перейти к полному прочтению."
+    )
+
+    try:
+        response = client.models.generate_content(
+            model="gemini-3.8-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_INSTRUCTION
+            )
+        )
+        summary = (response.text or "").strip()
+    except Exception as e:
+        print(f"Ошибка генерации выжимки: {e}")
+        summary = "В канале «Калейдоскоп» опубликован новый материал."
+
+    # 4. Публикуем тезисы со ссылкой на оригинальный пост
+    message_text = f"{summary}\n\nЧитать полностью: {post_link}"
+    try:
+        bot.send_message(chat_id, message_text)
+    except Exception as e:
+        print(f"Ошибка отправки сообщения: {e}")
 
 def process_ai_response(chat_id, message_id, message, contents, chat_type):
     history_data = load_history(chat_id)
@@ -96,6 +152,15 @@ def webhook():
         if chat_type in ['group', 'supergroup', 'channel']:
             if chat_id not in ALLOWED_GROUP_IDS:
                 return '!', 200
+
+            # --- ПЕРЕХВАТ ДУБЛИКАТОВ ИЗ КАНАЛА В ГРУППЕ ---
+            is_auto = getattr(message, 'is_automatic_forward', False)
+            from_channel_id, orig_msg_id = get_forward_info(message)
+            if is_auto and from_channel_id == CHANNEL_ID and chat_id == BREST_TALK_ID:
+                thread = Thread(target=process_channel_forward, args=(chat_id, message, orig_msg_id))
+                thread.start()
+                return '!', 200
+            # ----------------------------------------------
 
             user_text = message.text or message.caption or ""
             
