@@ -14,6 +14,9 @@ CHANNEL_ID = -1003555258619
 CHANNEL_USERNAME = "kaleidoscope_brest"
 BREST_TALK_ID = -1004415639090
 
+# Чат для одобренных конкурсных фотографий (Песочница)
+CONTEST_APPROVED_CHAT_ID = -1004392588464
+
 bot = telebot.TeleBot(TOKEN)
 client = genai.Client(api_key=GEMINI_API_KEY)
 app = Flask(__name__)
@@ -122,6 +125,22 @@ def process_ai_response(chat_id, message_id, message, contents, chat_type):
         bot.send_message(chat_id, gemini_response)
     else:
         bot.reply_to(message, gemini_response)
+
+    # --- ПЕРЕСЫЛКА ОДОБРЕННЫХ ФОТО В ПЕСОЧНИЦУ ---
+    if message.photo:
+        user_caption = message.caption or ""
+        if "#конкурс" in user_caption.lower() and "работа принята на конкурс" in gemini_response.lower():
+            author = message.from_user.first_name or "Участник"
+            username = f" (@{message.from_user.username})" if message.from_user.username else ""
+            try:
+                bot.send_photo(
+                    chat_id=CONTEST_APPROVED_CHAT_ID,
+                    photo=message.photo[-1].file_id,
+                    caption=f"✅ Одобрено на конкурс!\nАвтор: {author}{username}\n\nВердикт жюри:\n{gemini_response}"
+                )
+            except Exception as e:
+                print(f"Ошибка отправки одобренного фото в песочницу: {e}")
+    # ---------------------------------------------
 
     new_history = []
     for msg in chat.get_history():
