@@ -113,6 +113,22 @@ def webhook():
 
             bot.send_chat_action(chat_id, 'typing')
             
+            # --- ИНТЕГРАЦИЯ НАВЫКА ЧТЕНИЯ РЕПЛАЕВ ---
+            reply_text = ""
+            if message.reply_to_message:
+                if message.reply_to_message.text:
+                    reply_text = message.reply_to_message.text
+                elif message.reply_to_message.caption:
+                    reply_text = message.reply_to_message.caption
+                elif message.reply_to_message.poll:
+                    question = message.reply_to_message.poll.question
+                    options = ", ".join([opt.text for opt in message.reply_to_message.poll.options])
+                    reply_text = f"Опрос: {question} (Варианты: {options})"
+            
+            if reply_text:
+                user_text = f"[ВНИМАНИЕ: Пользователь отвечает на это сообщение: «{reply_text}»]\n{user_text}".strip()
+            # ----------------------------------------
+
             contents = []
             if user_text:
                 contents.append(user_text)
