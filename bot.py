@@ -52,7 +52,6 @@ SYSTEM_INSTRUCTION = """Ты — уважаемый старожил, опытн
   - Сохраняй авторитетность, литературный богатый русский язык и полное отсутствие эмодзи."""
 
 def get_current_date_ru():
-    """Возвращает текущую дату на русском языке в часовом поясе Бреста (UTC+3)"""
     months = ["января", "февраля", "марта", "апреля", "мая", "июня", 
               "июля", "августа", "сентября", "октября", "ноября", "декабря"]
     tz = timezone(timedelta(hours=3))
@@ -87,7 +86,7 @@ def process_channel_forward(chat_id, message, orig_msg_id):
     try:
         bot.delete_message(chat_id, message.message_id)
     except Exception as e:
-        print(f"Не удалось удалить дубликат поста: {e}")
+        pass
 
     post_link = f"https://t.me/{CHANNEL_USERNAME}/{orig_msg_id}" if orig_msg_id else f"https://t.me/{CHANNEL_USERNAME}"
 
@@ -108,20 +107,19 @@ def process_channel_forward(chat_id, message, orig_msg_id):
         summary = (response.text or "").strip()
         if "." in summary:
             summary = summary.split(".")[0] + "."
-    except Exception as e:
-        print(f"Ошибка генерации выжимки: {e}")
+    except Exception:
         summary = "В «Калейдоскопе» вышел новый материал, загляните на досуге."
 
-    message_text = f"📝 {summary}\n\n👉 [Читать полностью]({post_link})"
+    message_text = f"📝 {summary}\n\n👉 <a href='{post_link}'>Читать полностью</a>"
     try:
         bot.send_message(
             chat_id, 
             message_text, 
-            parse_mode="Markdown", 
+            parse_mode="HTML", 
             disable_web_page_preview=True
         )
     except Exception as e:
-        print(f"Ошибка отправки сообщения: {e}")
+        print(f"Ошибка отправки: {e}")
 
 def extract_media_part(message):
     media = None
@@ -154,7 +152,6 @@ def extract_media_part(message):
             media = doc
         else:
             return None
-
     if not media:
         return None
 
@@ -166,8 +163,7 @@ def extract_media_part(message):
         file_info = bot.get_file(media.file_id)
         downloaded = bot.download_file(file_info.file_path)
         return types.Part.from_bytes(data=downloaded, mime_type=mime_type)
-    except Exception as e:
-        print(f"Ошибка загрузки медиа: {e}")
+    except Exception:
         return None
 
 def process_ai_response(chat_id, message_id, message, contents, chat_type):
@@ -183,10 +179,19 @@ def process_ai_response(chat_id, message_id, message, contents, chat_type):
     gemini_response = chat.send_message(contents).text
     time.sleep(3)
 
-    if chat_type == 'channel':
-        bot.send_message(chat_id, gemini_response)
-    else:
-        bot.reply_to(message, gemini_response)
+    # Защищенная отправка с HTML-разметкой
+    try:
+        if chat_type == 'channel':
+            bot.send_message(chat_id, gemini_response, parse_mode="HTML")
+        else:
+            bot.reply_to(message, gemini_response, parse_mode="HTML")
+    except Exception as e:
+        print(f"Ошибка форматирования HTML, отправка без разметки: {e}")
+        # Фолбэк: если нейросеть ошиблась в тегах, отправляем просто как текст
+        if chat_type == 'channel':
+            bot.send_message(chat_id, gemini_response)
+        else:
+            bot.reply_to(message, gemini_response)
 
     if message.photo and chat_type != 'private':
         user_caption = message.caption or ""
@@ -199,8 +204,8 @@ def process_ai_response(chat_id, message_id, message, contents, chat_type):
                     photo=message.photo[-1].file_id,
                     caption=f"✅ Одобрено на конкурс!\nАвтор: {author}{username}\n\nВердикт жюри:\n{gemini_response}"
                 )
-            except Exception as e:
-                print(f"Ошибка отправки одобренного фото в песочницу: {e}")
+            except Exception:
+                pass
 
     new_history = []
     for msg in chat.get_history():
@@ -226,51 +231,49 @@ def webhook():
         if chat_type == 'private':
             if user_id == ADMIN_ID:
                 if message.text == '/start':
-                    bot.send_message(chat_id, "Приветствую, шеф. Готов обработать видео, документы или текст для редакции.")
+                    bot.send_message(chat_id, "Приветствую, шеф.")
                     return '!', 200
 
                 bot.send_chat_action(chat_id, 'typing')
                 media_part = extract_media_part(message)
                 contents = []
-
                 user_text = message.caption or message.text or ""
                 
-                # Триггеры для автоматического форматирования
                 is_kaleidoscope_cmd = any(word in user_text.lower() for word in ["калейдоскоп", "оформи"])
 
                 if media_part:
                     if is_kaleidoscope_cmd:
                         date_str = get_current_date_ru()
                         prompt = (
-                            f"Транскрибируй этот материал и СРАЗУ оформи его как пост.\n\n"
-                            f"ИНСТРУКЦИЯ ПО ОФОРМЛЕНИЮ:\n"
-                            f"Форматируй ответ как пост. Начни с короткого вступления, выдели жирным заголовок, "
-                            f"добавь две скрытые цитаты через спойлер (в Telegram это ||текст||) и заверши секцией «Мысли на полях». "
-                            f"В конце обязательно укажи подпись Kaleidoscope Brest и текущую дату: {date_str}.\n\n"
+                            f"Транскрибируй этот материал и СРАЗУ оформи его как готовый пост. "
+                            f"КАТЕГОРИЧЕСКИ ЗАПРЕЩАЕТСЯ выдумывать темы, которых нет в медиафайле. Сохрани оригинальный смысл.\n\n"
+                            f"ИНСТРУКЦИЯ ПО ОФОРМЛЕНИЮ (используй HTML-теги для Telegram):\n"
+                            f"1. <b>Жирный заголовок</b>.\n"
+                            f"2. Короткое вступление.\n"
+                            f"3. Сам транскрибированный текст.\n"
+                            f"4. Две сильные фразы спрячь под спойлер: <tg-spoiler>Цитата</tg-spoiler>\n"
+                            f"5. Секция «Мысли на полях».\n"
+                            f"6. Подпись: <i>Kaleidoscope Brest | {date_str}</i>\n\n"
                             f"Дополнительный комментарий: {user_text}"
                         )
                     else:
-                        prompt = (
-                            f"Изучи этот материал. Транскрибируй его смысловое наполнение и перепиши от своего лица "
-                            f"как опытный репортер и редактор-старожил со всей присущей тебе харизмой. "
-                            f"Текст должен читаться как твоя собственная авторская колонка, без эмодзи.\n"
-                            f"Дополнительное примечание автора: {user_text}" if user_text else
-                            f"Изучи этот материал. Транскрибируй его смысловое наполнение и перепиши от своего лица "
-                            f"как опытный репортер и редактор-старожил со всей присущей тебе харизмой. "
-                            f"Текст должен читаться как твоя собственная авторская колонка, без эмодзи."
-                        )
+                        prompt = "Изучи этот материал. Транскрибируй его смысловое наполнение и перепиши от своего лица."
                     contents.append(prompt)
                     contents.append(media_part)
                 else:
                     if is_kaleidoscope_cmd:
                         date_str = get_current_date_ru()
+                        # Жесткий промпт: работаем только как верстальщик
                         prompt = (
-                            f"Запрос: {user_text}\n\n"
-                            f"Возьми наш предыдущий текст (из истории переписки) и оформи его для канала Калейдоскоп.\n"
-                            f"ИНСТРУКЦИЯ ПО ОФОРМЛЕНИЮ:\n"
-                            f"Форматируй ответ как пост. Начни с короткого вступления, выдели жирным заголовок, "
-                            f"добавь две скрытые цитаты через спойлер (в Telegram это ||текст||) и заверши секцией «Мысли на полях». "
-                            f"В конце обязательно укажи подпись Kaleidoscope Brest и текущую дату: {date_str}."
+                            f"Тебе передан уже ГОТОВЫЙ текст: {user_text}\n\n"
+                            f"ТВОЯ ЗАДАЧА: Выступить исключительно в роли технического верстальщика. КАТЕГОРИЧЕСКИ ЗАПРЕЩАЕТСЯ переписывать суть текста, менять его стиль или придумывать новую тему.\n"
+                            f"Просто возьми исходный текст КАК ЕСТЬ и грамотно упакуй его в следующую структуру (обязательно используй HTML-теги):\n\n"
+                            f"1. <b>Жирный заголовок</b> (придумай короткий, подходящий к исходному тексту).\n"
+                            f"2. Короткое вступление.\n"
+                            f"3. Сам переданный текст без искажений и сокращений.\n"
+                            f"4. Две сильные фразы из текста спрячь под спойлер: <tg-spoiler>Цитата</tg-spoiler>\n"
+                            f"5. Добавь секцию «Мысли на полях» (очень короткий вывод по тексту).\n"
+                            f"6. Подпись строго в формате: <i>Kaleidoscope Brest | {date_str}</i>"
                         )
                         contents.append(prompt)
                     else:
@@ -279,12 +282,7 @@ def webhook():
                 thread = Thread(target=process_ai_response, args=(chat_id, message.message_id, message, contents, chat_type))
                 thread.start()
                 return '!', 200
-
-            if message.text == '/start':
-                bot.send_message(chat_id, "Приветствую. Я готов принять ваши материалы. Отправьте фото или текст, и я передам их в редакцию.")
-            else:
-                bot.forward_message(FORWARD_CHAT_ID, chat_id, message.message_id)
-                bot.send_message(chat_id, "Материалы получены и направлены редактору.")
+            
             return '!', 200
 
         if chat_type in ['group', 'supergroup', 'channel']:
@@ -320,13 +318,9 @@ def webhook():
                     reply_text = message.reply_to_message.text
                 elif message.reply_to_message.caption:
                     reply_text = message.reply_to_message.caption
-                elif message.reply_to_message.poll:
-                    question = message.reply_to_message.poll.question
-                    options = ", ".join([opt.text for opt in message.reply_to_message.poll.options])
-                    reply_text = f"Опрос: {question} (Варианты: {options})"
             
             if reply_text:
-                user_text = f"[ВНИМАНИЕ: Пользователь отвечает на это сообщение: «{reply_text}»]\n{user_text}".strip()
+                user_text = f"[ВНИМАНИЕ: Пользователь отвечает на этот текст: «{reply_text}»]\n{user_text}".strip()
 
             contents = []
             if user_text:
