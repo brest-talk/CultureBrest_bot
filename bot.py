@@ -1,21 +1,23 @@
-import os
+import io
 import json
+import os
 import time
-import telebot
-from flask import Flask, request
 from threading import Thread
+from flask import Flask, request
 from google import genai
 from google.genai import types
+import telebot
 
 TOKEN = os.environ.get('BOT_TOKEN')
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 
+ADMIN_ID = 6628087717
 CHANNEL_ID = -1003555258619
 CHANNEL_USERNAME = "kaleidoscope_brest"
 BREST_TALK_ID = -1004415639090
-
-# Чат для одобренных конкурсных фотографий (Песочница)
 CONTEST_APPROVED_CHAT_ID = -1004392588464
+FORWARD_CHAT_ID = -1004392588464
+ALLOWED_GROUP_IDS = [-1004415639090, -1004392588464, -1003555258619]
 
 bot = telebot.TeleBot(TOKEN)
 client = genai.Client(api_key=GEMINI_API_KEY)
@@ -38,10 +40,15 @@ SYSTEM_INSTRUCTION = """Ты — уважаемый старожил, опытн
 
 2. ПОВЕДЕНИЕ В КАНАЛЕ Калейдоскоп (ID: -1003555258619):
 * Переключайся в режим харизматичного репортера, сохраняя свой авторитет старожила.
-* Пиши посты ярко, литературно, с глубоким смыслом и вовлекающей подачей. Твоя задача — удерживать внимание аудитории как профессиональный писатель и куратор с большим жизненным опытом, пережившим и повидавшим многое, но так и не потерявшим любовь и тепло к людям."""
+* Пиши посты ярко, литературно, с глубоким смыслом и вовлекающей подачей. Твоя задача — удерживать внимание аудитории как профессиональный писатель и куратор с большим жизненным опытом, пережившим и повидавшим многое, но так и не потерявшим любовь и тепло к людям.
 
-FORWARD_CHAT_ID = -1004392588464
-ALLOWED_GROUP_IDS = [-1004415639090, -1004392588464, -1003555258619]
+3. ПОВЕДЕНИЕ В ЛИЧНЫХ СООБЩЕНИЯХ С ГЛАВНЫМ РЕДАКТОРОМ / АДМИНИСТРАТОРОМ:
+* Если прислан медиафайл (видео, аудио, голосовое сообщение, текстовый документ):
+  - Извлеки суть и транскрибируй сказанное/содержащееся.
+  - Не выдавай сухой подстрочный перевод и не делай отстраненный анализ.
+  - Пропусти всю информацию через свой характер, житейскую мудрость и авторский стиль опытного репортера-старожила.
+  - Изложи материал от первого лица, будто эту заметку, эссе или колонку написал лично ты по следам услышанного/увиденного.
+  - Сохраняй авторитетность, литературный богатый русский язык и полное отсутствие эмодзи."""
 
 def load_history(chat_id):
     filename = f"history_{chat_id}.json"
@@ -68,26 +75,17 @@ def get_forward_info(message):
 
 def process_channel_forward(chat_id, message, orig_msg_id):
     post_text = message.text or message.caption or "Новая публикация в канале."
-
-    # 1. Мгновенно удаляем прилетевший длинный дубликат из чата
     try:
         bot.delete_message(chat_id, message.message_id)
     except Exception as e:
         print(f"Не удалось удалить дубликат поста: {e}")
 
-    # 2. Формируем ссылку на оригинальный пост в канале
-    if orig_msg_id:
-        post_link = f"https://t.me/{CHANNEL_USERNAME}/{orig_msg_id}"
-    else:
-        post_link = f"https://t.me/{CHANNEL_USERNAME}"
+    post_link = f"https://t.me/{CHANNEL_USERNAME}/{orig_msg_id}" if orig_msg_id else f"https://t.me/{CHANNEL_USERNAME}"
 
-    # 3. Генерируем ультра-короткую интригу (до 10 слов)
     prompt = (
         f"Текст публикации из канала:\n«{post_text}»\n\n"
         f"Напиши ОДНУ очень короткую, интригующую мысль-затравку к этому материалу (строго 5-10 слов). "
-        f"Она должна быть емкой, в твоем фирменном стиле старожила, без лишних деталей и пересказов сюжета. "
-        f"Примеры: «Размышляю о том, куда уходит живое человеческое тепло...» или "
-        f"«Очередные мысли о том, как музыка теряет душу.»"
+        f"Она должна быть емкой, в твоем фирменном стиле старожила, без лишних деталей и пересказов сюжета."
     )
 
     try:
@@ -105,7 +103,6 @@ def process_channel_forward(chat_id, message, orig_msg_id):
         print(f"Ошибка генерации выжимки: {e}")
         summary = "В «Калейдоскопе» вышел новый материал, загляните на досуге."
 
-    # 4. Публикуем микро-анонс со скрытым превью ссылки
     message_text = f"📝 {summary}\n\n👉 [Читать полностью]({post_link})"
     try:
         bot.send_message(
@@ -116,6 +113,53 @@ def process_channel_forward(chat_id, message, orig_msg_id):
         )
     except Exception as e:
         print(f"Ошибка отправки сообщения: {e}")
+
+def extract_media_part(message):
+    media = None
+    mime_type = None
+
+    if message.photo:
+        media = message.photo[-1]
+        mime_type = "image/jpeg"
+    elif message.video:
+        media = message.video
+        mime_type = message.video.mime_type or "video/mp4"
+    elif message.audio:
+        media = message.audio
+        mime_type = message.audio.mime_type or "audio/mpeg"
+    elif message.voice:
+        media = message.voice
+        mime_type = message.voice.mime_type or "audio/ogg"
+    elif message.video_note:
+        media = message.video_note
+        mime_type = "video/mp4"
+    elif message.document:
+        doc = message.document
+        mime_type = doc.mime_type or "application/octet-stream"
+        supported_types = [
+            "text/", "application/pdf", "video/", "audio/", "image/",
+            "application/msword",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        ]
+        if any(mime_type.startswith(t) or t in mime_type for t in supported_types):
+            media = doc
+        else:
+            return None
+
+    if not media:
+        return None
+
+    file_size = getattr(media, 'file_size', 0)
+    if file_size > 20 * 1024 * 1024:
+        return None
+
+    try:
+        file_info = bot.get_file(media.file_id)
+        downloaded = bot.download_file(file_info.file_path)
+        return types.Part.from_bytes(data=downloaded, mime_type=mime_type)
+    except Exception as e:
+        print(f"Ошибка загрузки медиа: {e}")
+        return None
 
 def process_ai_response(chat_id, message_id, message, contents, chat_type):
     history_data = load_history(chat_id)
@@ -128,15 +172,14 @@ def process_ai_response(chat_id, message_id, message, contents, chat_type):
     )
     
     gemini_response = chat.send_message(contents).text
-    time.sleep(7)
+    time.sleep(3)
 
     if chat_type == 'channel':
         bot.send_message(chat_id, gemini_response)
     else:
         bot.reply_to(message, gemini_response)
 
-    # --- ПЕРЕСЫЛКА ОДОБРЕННЫХ ФОТО В ПЕСОЧНИЦУ ---
-    if message.photo:
+    if message.photo and chat_type != 'private':
         user_caption = message.caption or ""
         if "#конкурс" in user_caption.lower() and "работа принята на конкурс" in gemini_response.lower():
             author = message.from_user.first_name or "Участник"
@@ -149,7 +192,6 @@ def process_ai_response(chat_id, message_id, message, contents, chat_type):
                 )
             except Exception as e:
                 print(f"Ошибка отправки одобренного фото в песочницу: {e}")
-    # ---------------------------------------------
 
     new_history = []
     for msg in chat.get_history():
@@ -170,27 +212,55 @@ def webhook():
         chat_id = update.message.chat.id
         chat_type = update.message.chat.type
         message = update.message
+        user_id = message.from_user.id if message.from_user else None
 
         if chat_type == 'private':
+            if user_id == ADMIN_ID:
+                if message.text == '/start':
+                    bot.send_message(chat_id, "Приветствую, шеф. Готов обработать видео, документы или текст для редакции.")
+                    return '!', 200
+
+                bot.send_chat_action(chat_id, 'typing')
+                media_part = extract_media_part(message)
+                contents = []
+
+                if media_part:
+                    caption = message.caption or message.text or ""
+                    prompt = (
+                        f"Изучи этот материал. Транскрибирай его смысловое наполнение и перепиши от своего лица "
+                        f"как опытный репортер и редактор-старожил со всей присущей тебе харизмой. "
+                        f"Текст должен читаться как твоя собственная авторская колонка, без эмодзи.\n"
+                        f"Дополнительное примечание автора: {caption}" if caption else
+                        f"Изучи этот материал. Транскрибирай его смысловое наполнение и перепиши от своего лица "
+                        f"как опытный репортер и редактор-старожил со всей присущей тебе харизмой. "
+                        f"Текст должен читаться как твоя собственная авторская колонка, без эмодзи."
+                    )
+                    contents.append(prompt)
+                    contents.append(media_part)
+                else:
+                    contents.append(message.text or "Поделись своими мыслями.")
+
+                thread = Thread(target=process_ai_response, args=(chat_id, message.message_id, message, contents, chat_type))
+                thread.start()
+                return '!', 200
+
             if message.text == '/start':
                 bot.send_message(chat_id, "Приветствую. Я готов принять ваши материалы. Отправьте фото или текст, и я передам их в редакцию.")
             else:
                 bot.forward_message(FORWARD_CHAT_ID, chat_id, message.message_id)
                 bot.send_message(chat_id, "Материалы получены и направлены редактору.")
             return '!', 200
-        
+
         if chat_type in ['group', 'supergroup', 'channel']:
             if chat_id not in ALLOWED_GROUP_IDS:
                 return '!', 200
 
-            # --- ПЕРЕХВАТ ДУБЛИКАТОВ ИЗ КАНАЛА В ГРУППЕ ---
             is_auto = getattr(message, 'is_automatic_forward', False)
             from_channel_id, orig_msg_id = get_forward_info(message)
             if is_auto and from_channel_id == CHANNEL_ID and chat_id == BREST_TALK_ID:
                 thread = Thread(target=process_channel_forward, args=(chat_id, message, orig_msg_id))
                 thread.start()
                 return '!', 200
-            # ----------------------------------------------
 
             user_text = message.text or message.caption or ""
             
@@ -208,7 +278,6 @@ def webhook():
 
             bot.send_chat_action(chat_id, 'typing')
             
-            # --- ИНТЕГРАЦИЯ НАВЫКА ЧТЕНИЯ РЕПЛАЕВ ---
             reply_text = ""
             if message.reply_to_message:
                 if message.reply_to_message.text:
@@ -222,7 +291,6 @@ def webhook():
             
             if reply_text:
                 user_text = f"[ВНИМАНИЕ: Пользователь отвечает на это сообщение: «{reply_text}»]\n{user_text}".strip()
-            # ----------------------------------------
 
             contents = []
             if user_text:
@@ -230,14 +298,9 @@ def webhook():
             else:
                 contents.append("Взгляни на это.")
 
-            if message.photo:
-                file_info = bot.get_file(message.photo[-1].file_id)
-                downloaded_file = bot.download_file(file_info.file_path)
-                image_parts = types.Part.from_bytes(
-                    data=downloaded_file,
-                    mime_type='image/jpeg'
-                )
-                contents.append(image_parts)
+            media_part = extract_media_part(message)
+            if media_part:
+                contents.append(media_part)
 
             thread = Thread(target=process_ai_response, args=(chat_id, message.message_id, message, contents, chat_type))
             thread.start()
