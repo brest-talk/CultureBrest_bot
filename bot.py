@@ -95,8 +95,9 @@ def process_channel_forward(chat_id, message, orig_msg_id):
     )
 
     try:
+        # Используем предложенный вами вариант
         response = client.models.generate_content(
-            model="gemini-3.1-pro",
+            model="gemini-3.1-pro-latest",
             contents=prompt,
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_INSTRUCTION
@@ -169,8 +170,9 @@ def process_ai_response(chat_id, message_id, message, contents, chat_type):
     history_data = load_history(chat_id)
     
     try:
+        # Используем предложенный вами вариант
         chat = client.chats.create(
-            model="gemini-3.1-pro",
+            model="gemini-3.1-pro-latest",
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_INSTRUCTION
             ),
