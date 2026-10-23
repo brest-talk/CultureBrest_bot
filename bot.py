@@ -95,7 +95,6 @@ def process_channel_forward(chat_id, message, orig_msg_id):
     )
 
     try:
-        # Заменили модель на 3.1-pro
         response = client.models.generate_content(
             model="gemini-3.1-pro",
             contents=prompt,
@@ -106,7 +105,8 @@ def process_channel_forward(chat_id, message, orig_msg_id):
         summary = (response.text or "").strip()
         if "." in summary:
             summary = summary.split(".")[0] + "."
-    except Exception:
+    except Exception as e:
+        print(f"Ошибка API при генерации выжимки: {e}")
         summary = "В «Калейдоскопе» вышел новый материал, загляните на досуге."
 
     message_text = f"📝 {summary}\n\n👉 <a href='{post_link}'>Читать полностью</a>"
@@ -167,17 +167,22 @@ def extract_media_part(message):
 
 def process_ai_response(chat_id, message_id, message, contents, chat_type):
     history_data = load_history(chat_id)
-    # Заменили модель на 3.1-pro
-    chat = client.chats.create(
-        model="gemini-3.1-pro",
-        config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_INSTRUCTION
-        ),
-        history=history_data
-    )
     
-    gemini_response = chat.send_message(contents).text
-    time.sleep(3)
+    try:
+        chat = client.chats.create(
+            model="gemini-3.1-pro",
+            config=types.GenerateContentConfig(
+                system_instruction=SYSTEM_INSTRUCTION
+            ),
+            history=history_data
+        )
+        
+        gemini_response = chat.send_message(contents).text
+        time.sleep(3)
+    except Exception as e:
+        print(f"Ошибка API Gemini: {e}")
+        bot.send_message(chat_id, f"Произошла ошибка при обращении к мозгам бота: {e}")
+        return
 
     try:
         if chat_type == 'channel':
