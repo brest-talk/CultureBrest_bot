@@ -96,7 +96,7 @@ def process_channel_forward(chat_id, message, orig_msg_id):
 
     try:
         response = client.models.generate_content(
-            model="gemini-3.8-flash",
+            model="gemini-pro-latest",
             contents=prompt,
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_INSTRUCTION
@@ -170,7 +170,7 @@ def process_ai_response(chat_id, message_id, message, contents, chat_type):
     
     try:
         chat = client.chats.create(
-            model="gemini-3.8-flash",
+            model="gemini-pro-latest",
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_INSTRUCTION
             ),
@@ -257,9 +257,9 @@ def webhook():
                             f"ИНСТРУКЦИЯ ПО ОФОРМЛЕНИЮ (используй HTML-теги для Telegram):\n"
                             f"1. <i>Короткое вступление курсивом.</i>\n"
                             f"2. <b>Жирный заголовок</b>.\n"
-                            f"3. Разбей основной текст/цитаты на логические блоки и оберни каждый в тег раскрывающейся цитаты: <blockquote expandable>текст блока</blockquote>\n"
+                            f"3. Весь основной текст помести строго в ОДНУ раскрывающуюся цитату: <blockquote expandable>весь основной текст одним блоком</blockquote>. Не дроби текст на несколько цитат!\n"
                             f"4. Секция: <b>Мысли на полях:</b>\n"
-                            f"5. Текст мыслей оберни в цитату и курсив: <blockquote expandable><i>текст мыслей</i></blockquote>\n"
+                            f"5. Текст мыслей оберни во ВТОРУЮ цитату и курсив: <blockquote expandable><i>короткий вывод по тексту</i></blockquote>\n"
                             f"6. Подпись строго в две строки:\nKaleidoscope | Brest 🎨\n{date_str}\n\n"
                             f"Дополнительный комментарий: {user_text}"
                         )
@@ -278,9 +278,9 @@ def webhook():
                             f"Просто возьми переданный текст КАК ЕСТЬ и грамотно упакуй его в следующую структуру (обязательно используй HTML-теги):\n\n"
                             f"1. <i>Короткое вступление курсивом (на основе текста).</i>\n"
                             f"2. <b>Жирный заголовок</b> (придумай подходящий к тексту).\n"
-                            f"3. Разбей основной текст/цитаты на логические блоки и оберни каждый в тег раскрывающейся цитаты: <blockquote expandable>текст блока</blockquote>\n"
+                            f"3. Весь основной текст помести строго в ОДНУ раскрывающуюся цитату: <blockquote expandable>весь основной текст одним блоком</blockquote>. Не дроби текст на несколько цитат!\n"
                             f"4. Секция: <b>Мысли на полях:</b>\n"
-                            f"5. Текст мыслей оберни в цитату и курсив: <blockquote expandable><i>короткий вывод по тексту</i></blockquote>\n"
+                            f"5. Текст мыслей оберни во ВТОРУЮ цитату и курсив: <blockquote expandable><i>короткий вывод по тексту</i></blockquote>\n"
                             f"6. Подпись строго в две строки:\nKaleidoscope | Brest 🎨\n{date_str}"
                         )
                         contents.append(prompt)
