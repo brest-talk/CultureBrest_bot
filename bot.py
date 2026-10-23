@@ -50,11 +50,11 @@ SYSTEM_INSTRUCTION = """Ты — глубокий, многогранный ин
 * Если дана команда на ВЕРСТКУ / ОФОРМЛЕНИЕ готового текста: Ты мгновенно отключаешь философа и работаешь СТРОГО как идеальный технический исполнитель. Ты ничего не придумываешь от себя, а лишь безупречно применяешь заданную HTML-разметку к предоставленному тексту."""
 
 def get_current_date_ru():
-    months = ["января", "февраля", "марта", "апреля", "мая", "июня", 
-              "июля", "августа", "сентября", "октября", "ноября", "декабря"]
+    months = ["янв.", "фев.", "мар.", "апр.", "мая", "июн.", 
+              "июл.", "авг.", "сен.", "окт.", "ноя.", "дек."]
     tz = timezone(timedelta(hours=3))
     now = datetime.now(tz)
-    return f"{now.day} {months[now.month - 1]} {now.year} года"
+    return f"{now.day} {months[now.month - 1]} {now.year} г."
 
 def load_history(chat_id):
     filename = f"history_{chat_id}.json"
@@ -95,7 +95,6 @@ def process_channel_forward(chat_id, message, orig_msg_id):
     )
 
     try:
-        # Возвращаем рабочий gemini-3.8-flash
         response = client.models.generate_content(
             model="gemini-3.8-flash",
             contents=prompt,
@@ -170,7 +169,6 @@ def process_ai_response(chat_id, message_id, message, contents, chat_type):
     history_data = load_history(chat_id)
     
     try:
-        # Возвращаем рабочий gemini-3.8-flash
         chat = client.chats.create(
             model="gemini-3.8-flash",
             config=types.GenerateContentConfig(
@@ -246,7 +244,6 @@ def webhook():
                 
                 is_kaleidoscope_cmd = any(word in user_text.lower() for word in ["калейдоскоп", "оформи"])
 
-                # Проверяем, ответил ли админ на какое-то сообщение (Reply)
                 reply_text = ""
                 if message.reply_to_message:
                     reply_text = message.reply_to_message.text or message.reply_to_message.caption or ""
@@ -258,12 +255,12 @@ def webhook():
                             f"Транскрибируй этот материал и СРАЗУ оформи его как готовый пост. "
                             f"КАТЕГОРИЧЕСКИ ЗАПРЕЩАЕТСЯ выдумывать темы, которых нет в медиафайле. Сохрани оригинальный смысл.\n\n"
                             f"ИНСТРУКЦИЯ ПО ОФОРМЛЕНИЮ (используй HTML-теги для Telegram):\n"
-                            f"1. <b>Жирный заголовок</b>.\n"
-                            f"2. Короткое вступление.\n"
-                            f"3. Сам транскрибированный текст.\n"
-                            f"4. Две сильные фразы спрячь под спойлер: <tg-spoiler>Цитата</tg-spoiler>\n"
-                            f"5. Секция «Мысли на полях».\n"
-                            f"6. Подпись: <i>Kaleidoscope Brest | {date_str}</i>\n\n"
+                            f"1. <i>Короткое вступление курсивом.</i>\n"
+                            f"2. <b>Жирный заголовок</b>.\n"
+                            f"3. Разбей основной текст/цитаты на логические блоки и оберни каждый в тег раскрывающейся цитаты: <blockquote expandable>текст блока</blockquote>\n"
+                            f"4. Секция: <b>Мысли на полях:</b>\n"
+                            f"5. Текст мыслей оберни в цитату и курсив: <blockquote expandable><i>текст мыслей</i></blockquote>\n"
+                            f"6. Подпись строго в две строки:\nKaleidoscope | Brest 🎨\n{date_str}\n\n"
                             f"Дополнительный комментарий: {user_text}"
                         )
                     else:
@@ -273,19 +270,18 @@ def webhook():
                 else:
                     if is_kaleidoscope_cmd:
                         date_str = get_current_date_ru()
-                        # Если есть текст из реплая, берем его! Иначе берем то, что ввел юзер
                         text_to_format = reply_text if reply_text else user_text
                         
                         prompt = (
                             f"Тебе передан уже ГОТОВЫЙ текст:\n«{text_to_format}»\n\n"
                             f"ТВОЯ ЗАДАЧА: Выступить исключительно в роли технического верстальщика. КАТЕГОРИЧЕСКИ ЗАПРЕЩАЕТСЯ переписывать суть текста, менять его стиль или придумывать новую тему.\n"
                             f"Просто возьми переданный текст КАК ЕСТЬ и грамотно упакуй его в следующую структуру (обязательно используй HTML-теги):\n\n"
-                            f"1. <b>Жирный заголовок</b> (придумай короткий, подходящий к исходному тексту).\n"
-                            f"2. Короткое вступление.\n"
-                            f"3. Сам переданный текст без искажений и сокращений.\n"
-                            f"4. Две сильные фразы из текста спрячь под спойлер: <tg-spoiler>Цитата</tg-spoiler>\n"
-                            f"5. Добавь секцию «Мысли на полях» (очень короткий вывод по тексту).\n"
-                            f"6. Подпись строго в формате: <i>Kaleidoscope Brest | {date_str}</i>"
+                            f"1. <i>Короткое вступление курсивом (на основе текста).</i>\n"
+                            f"2. <b>Жирный заголовок</b> (придумай подходящий к тексту).\n"
+                            f"3. Разбей основной текст/цитаты на логические блоки и оберни каждый в тег раскрывающейся цитаты: <blockquote expandable>текст блока</blockquote>\n"
+                            f"4. Секция: <b>Мысли на полях:</b>\n"
+                            f"5. Текст мыслей оберни в цитату и курсив: <blockquote expandable><i>короткий вывод по тексту</i></blockquote>\n"
+                            f"6. Подпись строго в две строки:\nKaleidoscope | Brest 🎨\n{date_str}"
                         )
                         contents.append(prompt)
                     else:
