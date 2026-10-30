@@ -263,22 +263,19 @@ def run_quiz_game(admin_chat_id, target_chat_id):
 
         bot.send_message(
             target_chat_id,
-            f"🎭 <b>Интеллектуальная викторина начинается!</b>\n\n"
-            f"Правила:\n"
-            f"• Всего <b>{len(questions)} вопросов</b> по возрастанию сложности (длительность квиза — <b>20 минут</b>).\n"
-            f"• На каждый вопрос даётся <b>30 секунд</b>.\n"
-            f"• Баллы (+10) получает тот, кто ответит правильно <b>быстрее всех</b>.\n"
-            f"• Пауза между вопросами — <b>1.5 минуты</b> для обсуждения.\n"
-            f"• Призы для <b>топ-3 финалистов</b> зависят от набранных баллов по витрине Telegram (15 ⭐️ 🧸, 25 ⭐️ 🎁, 50 ⭐️ 🚀, максимум — 100 ⭐️ 🏆):\n"
-            f"  • 100 баллов = <b>100 ⭐️ 🏆</b>\n"
-            f"  • от 50 до 90 баллов = <b>50 ⭐️ 🚀</b>\n"
-            f"  • от 25 до 40 баллов = <b>25 ⭐️ 🎁</b>\n"
-            f"  • от 15 до 20 баллов = <b>15 ⭐️ 🧸</b>\n"
-            f"  • менее 15 баллов = <b>0 звёзд (без приза)</b>\n\n"
-            f"<i>Первый вопрос через 5 секунд...</i>",
+            "🎭 <b>Викторина начинается!</b>\n\n"
+            "• <b>10 вопросов</b> (20 минут на всю игру)\n"
+            "• <b>30 секунд</b> на ответ | Пауза <b>1.5 минуты</b>\n"
+            "• Баллы (+10) забирает тот, кто ответит <b>быстрее всех</b>\n"
+            "• Награды для топ-3 по витрине Telegram (до <b>100 ⭐️ 🏆</b>)\n\n"
+            "⏳ <i>Первый вопрос появится через 1,5 минуты. Готовьтесь!</i>",
             parse_mode="HTML"
         )
-        time.sleep(5)
+        for _ in range(90):
+            with quiz_lock:
+                if not QUIZ_STATE["is_running"]:
+                    return
+            time.sleep(1)
 
         total_q = len(QUIZ_STATE["questions"])
         for i, q in enumerate(QUIZ_STATE["questions"], start=1):
@@ -675,7 +672,7 @@ def webhook():
 
         cmd_clean = user_text.strip().lower().split('@')[0]
 
-        if user_id == ADMIN_ID and cmd_clean in ['/quiz_stop', '!стопквиз']:
+        if user_id == ADMIN_ID and cmd_clean == '/stop_quiz':
             with quiz_lock:
                 QUIZ_STATE["is_running"] = False
             bot.send_message(chat_id, "🛑 Викторина принудительно остановлена.")
@@ -712,7 +709,7 @@ def webhook():
                 QUIZ_STATE["answers"] = {}
 
             target_chat = BREST_TALK_ID if chat_type == 'private' else chat_id
-            bot.send_message(chat_id, "🧩 Квиз запущен! Игра скоро начнется... ⏳")
+            bot.send_message(chat_id, "🧩 Квиз запущен! игра скоро начнется.. ")
             Thread(target=run_quiz_game, args=(chat_id, target_chat)).start()
             return '!', 200
 
