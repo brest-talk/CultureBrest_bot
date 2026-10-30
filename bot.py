@@ -47,7 +47,11 @@ QUIZ_STATE = {
     "questions": [],
     "answers": {},
     "scores_file": "quiz_scores.json",
-    "target_score": 100
+    "prizes": {
+        1: 50,
+        2: 30,
+        3: 20
+    }
 }
 
 SYSTEM_INSTRUCTION = """Ты — глубокий, многогранный интеллектуал, уважаемый старожил, опытный редактор и философ-наблюдатель с огромным жизненным багажом. Твой характер сложен и интересен: ты можешь быть тонким ироничным мыслителем, строгим эстетом или чутким наставником, но всегда сохраняешь свою суть — человека, который видит мир насквозь, обладает широчайшим кругозором, но продолжает любить людей. 
@@ -86,12 +90,6 @@ def get_current_date_ru():
     tz = timezone(timedelta(hours=3))
     now = datetime.now(tz)
     return f"{now.day} {months[now.month - 1]} {now.year} г."
-
-def get_current_iso_week():
-    tz = timezone(timedelta(hours=3))
-    now = datetime.now(tz)
-    iso_year, iso_week, _ = now.isocalendar()
-    return f"{iso_year}-W{iso_week:02d}"
 
 def delete_later(chat_id, message_id, delay=3600):
     time.sleep(delay)
@@ -137,39 +135,24 @@ def save_history(chat_id, history):
             print(f"Ошибка сохранения истории {filename}: {e}")
 
 def load_quiz_scores():
-    current_week = get_current_iso_week()
     with quiz_lock:
         if os.path.exists(QUIZ_STATE["scores_file"]):
             try:
                 with open(QUIZ_STATE["scores_file"], "r", encoding="utf-8") as f:
                     data = json.load(f)
                 if isinstance(data, dict):
-                    if "week" in data and "scores" in data:
-                        if data.get("week") != current_week:
-                            reset_payload = {"week": current_week, "scores": {}}
-                            with open(QUIZ_STATE["scores_file"], "w", encoding="utf-8") as fw:
-                                json.dump(reset_payload, fw, ensure_ascii=False, indent=2)
-                            return {}
-                        return data.get("scores", {})
-                    else:
-                        migrated_payload = {"week": current_week, "scores": data}
-                        with open(QUIZ_STATE["scores_file"], "w", encoding="utf-8") as fw:
-                            json.dump(migrated_payload, fw, ensure_ascii=False, indent=2)
-                        return data
+                    if "scores" in data and isinstance(data["scores"], dict):
+                        return data["scores"]
+                    return data
             except Exception:
                 return {}
     return {}
 
 def save_quiz_scores(scores):
-    current_week = get_current_iso_week()
-    payload = {
-        "week": current_week,
-        "scores": scores
-    }
     with quiz_lock:
         try:
             with open(QUIZ_STATE["scores_file"], "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False, indent=2)
+                json.dump(scores, f, ensure_ascii=False, indent=2)
         except Exception as e:
             print(f"Ошибка сохранения очков квиза: {e}")
 
@@ -178,9 +161,10 @@ def add_quiz_score(user_id, user_name, points=10):
         scores = load_quiz_scores()
         uid = str(user_id)
         if uid not in scores:
-            scores[uid] = {"name": user_name, "points": 0}
+            scores[uid] = {"name": user_name, "points": 0, "last_time": time.time()}
         scores[uid]["points"] += points
         scores[uid]["name"] = user_name
+        scores[uid]["last_time"] = time.time()
         save_quiz_scores(scores)
         return scores[uid]["points"]
 
@@ -268,18 +252,27 @@ def run_quiz_game(admin_chat_id, target_chat_id):
             if not QUIZ_STATE["is_running"]:
                 return
             QUIZ_STATE["questions"] = questions
+            save_quiz_scores({})
 
+        prizes = QUIZ_STATE["prizes"]
         bot.send_message(
             target_chat_id,
-            "🎭 <b>Интеллектуальная викторина начинается!</b>\n\n"
-            "Правила: на каждый вопрос даётся <b>25 секунд</b>.\n"
-            "Баллы (+10) получает тот, кто ответит правильно <b>быстрее всех</b>.\n"
-            "Очки суммируются за весь сезон до достижения 100 баллов. Первый, кто наберёт 100 баллов, получает кубок и приз в 100 звёзд!\n\n"
-            "<i>Первый вопрос через 5 секунд...</i>",
+            f"🎭 <b>Интеллектуальная викторина начинается!</b>\n\n"
+            f"Правила:\n"
+            f"• Всего <b>{len(questions)} вопросов</b> по возрастанию сложности.\n"
+            f"• На каждый вопрос даётся <b>30 секунд</b>.\n"
+            f"• Баллы (+10) получает тот, кто ответит правильно <b>быстрее всех</b>.\n"
+            f"• Пауза между вопросами — <b>2 минуты</b> для обсуждения.\n"
+            f"• По итогам текущей игры определяются <b>3 финалиста</b>, которые разделят призовой фонд в <b>Telegram Stars</b>:\n"
+            f"  🥇 1 место — <b>{prizes[1]} ⭐️</b>\n"
+            f"  🥈 2 место — <b>{prizes[2]} ⭐️</b>\n"
+            f"  🥉 3 место — <b>{prizes[3]} ⭐️</b>\n\n"
+            f"<i>Первый вопрос через 5 секунд...</i>",
             parse_mode="HTML"
         )
         time.sleep(5)
 
+        total_q = len(QUIZ_STATE["questions"])
         for i, q in enumerate(QUIZ_STATE["questions"], start=1):
             with quiz_lock:
                 if not QUIZ_STATE["is_running"]:
@@ -304,7 +297,7 @@ def run_quiz_game(admin_chat_id, target_chat_id):
             markup.add(*buttons)
 
             msg_text = (
-                f"<b>Вопрос №{i} из {len(QUIZ_STATE['questions'])}</b> (время: 25 сек):\n\n"
+                f"<b>Вопрос №{i} из {total_q}</b> (время: 30 сек):\n\n"
                 f"<b>{q.get('question', 'Вопрос')}</b>"
             )
             try:
@@ -313,7 +306,7 @@ def run_quiz_game(admin_chat_id, target_chat_id):
                 print(f"Ошибка отправки вопроса: {e}")
                 continue
 
-            for _ in range(25):
+            for _ in range(30):
                 with quiz_lock:
                     if not QUIZ_STATE["is_running"]:
                         break
@@ -337,6 +330,7 @@ def run_quiz_game(admin_chat_id, target_chat_id):
 
             correct_opt_letter = chr(65 + correct_idx)
             correct_opt_text = options[correct_idx]
+            next_q_note = "\n\n⏳ <i>Следующий вопрос через 2 минуты...</i>" if i < total_q else ""
 
             if correct_answers:
                 first_correct = correct_answers[0]
@@ -345,42 +339,77 @@ def run_quiz_game(admin_chat_id, target_chat_id):
                     f"⏱ <b>Время вышло!</b>\n"
                     f"Правильный ответ: <b>{correct_opt_letter}) {correct_opt_text}</b>\n\n"
                     f"⚡️ Первым правильно ответил: <b>{first_correct['name']}</b> (+10 баллов)!\n"
-                    f"Текущий счёт: <b>{total_score}</b> баллов.\n"
+                    f"Счёт в текущей игре: <b>{total_score}</b> баллов.\n"
                     f"<i>{q.get('comment', '')}</i>"
+                    f"{next_q_note}"
                 )
                 bot.send_message(target_chat_id, res_text, parse_mode="HTML")
-
-                if total_score >= QUIZ_STATE["target_score"]:
-                    bot.send_message(
-                        target_chat_id,
-                        f"🏆 <b>У нас есть абсолютный победитель!</b>\n\n"
-                        f"Участник <b>{first_correct['name']}</b> первым набрал {total_score} баллов и забирает кубок и приз в <b>100 звёзд</b>! 🎉",
-                        parse_mode="HTML"
-                    )
-                    break
             else:
                 res_text = (
                     f"⏱ <b>Время вышло!</b>\n"
                     f"Правильный ответ: <b>{correct_opt_letter}) {correct_opt_text}</b>\n\n"
                     f"Никто не успел дать правильный ответ.\n"
                     f"<i>{q.get('comment', '')}</i>"
+                    f"{next_q_note}"
                 )
                 bot.send_message(target_chat_id, res_text, parse_mode="HTML")
 
-            time.sleep(3)
+            if i < total_q:
+                for _ in range(120):
+                    with quiz_lock:
+                        if not QUIZ_STATE["is_running"]:
+                            break
+                    time.sleep(1)
 
         with quiz_lock:
             is_still_running = QUIZ_STATE["is_running"]
 
         if is_still_running:
             scores = load_quiz_scores()
-            sorted_scores = sorted(scores.values(), key=lambda x: x["points"], reverse=True)[:10]
-            leaders_text = "\n".join([f"{idx+1}. {p['name']} — {p['points']} баллов" for idx, p in enumerate(sorted_scores)])
+            sorted_scores = sorted(
+                scores.values(),
+                key=lambda x: (-x.get("points", 0), x.get("last_time", float("inf")))
+            )
+
+            medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+            finalists = sorted_scores[:3]
+
+            if finalists:
+                finalists_lines = []
+                for place, p in enumerate(finalists, start=1):
+                    star_prize = prizes.get(place, 0)
+                    medal = medals.get(place, f"{place}.")
+                    finalists_lines.append(
+                        f"{medal} <b>{place} место:</b> {p['name']} — <b>{p['points']} баллов</b> "
+                        f"(Приз: <b>{star_prize} Telegram Stars ⭐️</b>)"
+                    )
+                finalists_text = "\n".join(finalists_lines)
+
+                other_players = sorted_scores[3:10]
+                others_text = ""
+                if other_players:
+                    others_lines = [
+                        f"{idx}. {p['name']} — {p['points']} баллов"
+                        for idx, p in enumerate(other_players, start=4)
+                    ]
+                    others_text = "\n\n<b>Остальные участники:</b>\n" + "\n".join(others_lines)
+
+                final_msg_text = (
+                    f"🏁 <b>Викторина завершена! Итоги игры:</b>\n\n"
+                    f"🏆 <b>Тройка финалистов и распределение призового фонда:</b>\n"
+                    f"{finalists_text}"
+                    f"{others_text}\n\n"
+                    f"🎉 Поздравляем победителей! Администратор свяжется с финалистами для вручения Telegram Stars."
+                )
+            else:
+                final_msg_text = (
+                    "📊 <b>Викторина завершена!</b>\n\n"
+                    "В этой игре никому не удалось набрать баллы. До встречи в следующем раунде!"
+                )
 
             leaderboard_msg = bot.send_message(
                 target_chat_id,
-                f"📊 <b>Викторина завершена!</b>\n\n"
-                f"<b>Топ участников сезона:</b>\n{leaders_text or 'Пока никто не набрал баллы'}",
+                final_msg_text,
                 parse_mode="HTML"
             )
             Thread(target=delete_later, args=(target_chat_id, leaderboard_msg.message_id, 3600)).start()
@@ -650,13 +679,16 @@ def webhook():
             if chat_type in ['group', 'supergroup', 'channel'] and chat_id not in ALLOWED_GROUP_IDS:
                 return '!', 200
             scores = load_quiz_scores()
-            sorted_scores = sorted(scores.values(), key=lambda x: x["points"], reverse=True)[:10]
+            sorted_scores = sorted(
+                scores.values(),
+                key=lambda x: (-x.get("points", 0), x.get("last_time", float("inf")))
+            )[:10]
             leaders_text = "\n".join(
                 [f"{idx+1}. {p['name']} — {p['points']} баллов" for idx, p in enumerate(sorted_scores)]
             )
             bot.send_message(
                 chat_id,
-                f"🏆 <b>Топ-10 участников сезона:</b>\n\n"
+                f"🏆 <b>Текущий рейтинг игры:</b>\n\n"
                 f"{leaders_text or 'Пока никто не набрал баллы'}",
                 parse_mode="HTML"
             )
