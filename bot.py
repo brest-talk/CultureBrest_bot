@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import re
 import time
 from datetime import datetime, timezone, timedelta
 from threading import Thread, Lock, RLock
@@ -197,26 +198,63 @@ def generate_quiz_questions(theme="общая эрудиция, искусств
         f'  {{"question": "Текст вопроса", "options": ["Вариант A", "Вариант B", "Вариант C", "Вариант D"], "correct_idx": 0, "comment": "Короткий факт или пояснение к ответу"}}'
         f']'
     )
+    raw_text = ""
     try:
         response = client.models.generate_content(
-            model="models/gemini-2.5-flash",
+            model="gemini-3.8-flash",
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json"
             )
         )
-        text = (response.text or "").strip()
-        if text.startswith("```"):
-            lines = text.splitlines()
-            if lines and lines[0].startswith("```"):
-                lines = lines[1:]
-            if lines and lines[-1].startswith("```"):
-                lines = lines[:-1]
-            text = "\n".join(lines).strip()
-        data = json.loads(text)
-        return data if isinstance(data, list) else []
+        raw_text = (response.text or "").strip()
+        if not raw_text:
+            print("Ошибка генерации вопросов: получен пустой ответ от модели gemini-3.8-flash.")
+            return []
+
+        cleaned_text = re.sub(r"^```(?:json)?\s*", "", raw_text, flags=re.IGNORECASE)
+        cleaned_text = re.sub(r"\s*```$", "", cleaned_text).strip()
+
+        start_idx = cleaned_text.find("[")
+        end_idx = cleaned_text.rfind("]")
+        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+            cleaned_text = cleaned_text[start_idx:end_idx + 1]
+
+        data = json.loads(cleaned_text)
+        if not isinstance(data, list):
+            print(f"Ошибка валидации JSON квиза: ожидался список (list), получено {type(data).__name__}.")
+            return []
+
+        valid_questions = []
+        for idx, item in enumerate(data, start=1):
+            if not isinstance(item, dict):
+                continue
+            question_text = item.get("question")
+            options = item.get("options")
+            correct_idx = item.get("correct_idx")
+            if (
+                isinstance(question_text, str) and question_text.strip()
+                and isinstance(options, list) and len(options) >= 2
+                and isinstance(correct_idx, int) and 0 <= correct_idx < len(options)
+            ):
+                valid_questions.append({
+                    "question": question_text.strip(),
+                    "options": [str(opt) for opt in options],
+                    "correct_idx": correct_idx,
+                    "comment": str(item.get("comment", "")).strip()
+                })
+            else:
+                print(f"Пропущен некорректный вопрос #{idx}: {item}")
+
+        if not valid_questions:
+            print(f"Ошибка генерации вопросов: ни один вопрос не прошёл валидацию. Сырой ответ: {raw_text[:500]}")
+        return valid_questions
+
+    except json.JSONDecodeError as je:
+        print(f"Ошибка парсинга JSON в generate_quiz_questions: {je}. Сырой ответ модели:\n{raw_text[:1000]}")
+        return []
     except Exception as e:
-        print(f"Ошибка генерации вопросов: {e}")
+        print(f"Ошибка API при генерации вопросов ({type(e).__name__}): {e}")
         return []
 
 def run_quiz_game(admin_chat_id, target_chat_id):
@@ -382,7 +420,7 @@ def process_channel_forward(chat_id, message, orig_msg_id):
 
     try:
         response = client.models.generate_content(
-            model="models/gemini-3.8-flash",
+            model="gemini-3.8-flash",
             contents=prompt,
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_INSTRUCTION
@@ -479,7 +517,7 @@ def process_ai_response(chat_id, message_id, message, contents, chat_type):
     
     try:
         chat = client.chats.create(
-            model="models/gemini-3.8-flash",
+            model="gemini-3.8-flash",
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_INSTRUCTION
             ),
