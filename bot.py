@@ -3,14 +3,14 @@ import json
 import os
 import time
 from datetime import datetime, timezone, timedelta
-from threading import Thread
+from threading import Thread, Lock, RLock
 from flask import Flask, request
 from google import genai
 from google.genai import types
 import telebot
 
-TOKEN = os.environ.get('BOT_TOKEN')
-GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
+TOKEN = os.environ.get('BOT_TOKEN', '')
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
 
 ADMIN_ID = 6628087717
 CHANNEL_ID = -1003555258619
@@ -20,9 +20,34 @@ CONTEST_APPROVED_CHAT_ID = -1004392588464
 FORWARD_CHAT_ID = -1004392588464
 ALLOWED_GROUP_IDS = [-1004415639090, -1004392588464, -1003555258619]
 
+MAX_HISTORY_MESSAGES = 30
+
 bot = telebot.TeleBot(TOKEN)
 client = genai.Client(api_key=GEMINI_API_KEY)
 app = Flask(__name__)
+history_lock = Lock()
+quiz_lock = RLock()
+
+_BOT_INFO = None
+
+def get_bot_info():
+    global _BOT_INFO
+    if _BOT_INFO is None:
+        try:
+            _BOT_INFO = bot.get_me()
+        except Exception as e:
+            print(f"Ошибка получения данных бота: {e}")
+            return None
+    return _BOT_INFO
+
+QUIZ_STATE = {
+    "is_running": False,
+    "current_question": 0,
+    "questions": [],
+    "answers": {},
+    "scores_file": "quiz_scores.json",
+    "target_score": 100
+}
 
 SYSTEM_INSTRUCTION = """Ты — глубокий, многогранный интеллектуал, уважаемый старожил, опытный редактор и философ-наблюдатель с огромным жизненным багажом. Твой характер сложен и интересен: ты можешь быть тонким ироничным мыслителем, строгим эстетом или чутким наставником, но всегда сохраняешь свою суть — человека, который видит мир насквозь, обладает широчайшим кругозором, но продолжает любить людей. 
 Твой стиль — это литература высшей пробы. Тонкая ирония, эрудиция, спокойное достоинство и безупречный, богатый русский язык без лишней эмоциональности и суеты. Строго никаких смайликов и эмодзи.
@@ -42,7 +67,7 @@ SYSTEM_INSTRUCTION = """Ты — глубокий, многогранный ин
 * Анализ фото и искусства: Проводи вдумчивый разбор ТОЛЬКО для реальных фотоснимков и визуальных произведений. Не трать свой талант на графоманию или пустые картинки (мемы, стикеры).
 * Базовое общение: На простые реплики отвечай предельно кратко (1–2 предложения), используя емкую философскую мысль или сдержанную реплику мастера. Если вопрос глубокий — отвечай развернуто, опираясь на свой кругозор и выбранный "оттенок настроения".
 * ОЦЕНКА КОНКУРСНЫХ ФОТО (Триггер: хештег #конкурс):
-  * Тема: скажи, что на данный момент, нет активного конкурса, ожидайте информацию в группе.
+  * Тема: скажи, что на данный момент нет активного конкурса, ожидайте информацию в группе.
 
 2. ПОВЕДЕНИЕ В КАНАЛЕ Калейдоскоп (ID: -1003555258619):
 * Суть: Здесь ты — блестящий эссеист, куратор и профессиональный писатель.
@@ -61,17 +86,273 @@ def get_current_date_ru():
     now = datetime.now(tz)
     return f"{now.day} {months[now.month - 1]} {now.year} г."
 
+def get_current_iso_week():
+    tz = timezone(timedelta(hours=3))
+    now = datetime.now(tz)
+    iso_year, iso_week, _ = now.isocalendar()
+    return f"{iso_year}-W{iso_week:02d}"
+
+def delete_later(chat_id, message_id, delay=3600):
+    time.sleep(delay)
+    try:
+        bot.delete_message(chat_id, message_id)
+    except Exception:
+        pass
+
 def load_history(chat_id):
     filename = f"history_{chat_id}.json"
-    if os.path.exists(filename):
-        with open(filename, "r", encoding="utf-8") as f:
-            return json.load(f)
+    with history_lock:
+        if os.path.exists(filename):
+            try:
+                with open(filename, "r", encoding="utf-8") as f:
+                    raw_data = json.load(f)
+                history = []
+                for item in raw_data:
+                    role = item.get("role")
+                    parts_data = item.get("parts", [])
+                    parts = [
+                        types.Part.from_text(text=p["text"])
+                        for p in parts_data
+                        if isinstance(p, dict) and p.get("text")
+                    ]
+                    if role in ("user", "model") and parts:
+                        history.append(types.Content(role=role, parts=parts))
+                return history
+            except Exception as e:
+                print(f"Ошибка чтения истории {filename}: {e}")
+                return []
     return []
 
 def save_history(chat_id, history):
     filename = f"history_{chat_id}.json"
-    with open(filename, "w", encoding="utf-8") as f:
-        json.dump(history, f, ensure_ascii=False)
+    trimmed = history[-MAX_HISTORY_MESSAGES:]
+    while trimmed and trimmed[0].get("role") != "user":
+        trimmed.pop(0)
+    with history_lock:
+        try:
+            with open(filename, "w", encoding="utf-8") as f:
+                json.dump(trimmed, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"Ошибка сохранения истории {filename}: {e}")
+
+def load_quiz_scores():
+    current_week = get_current_iso_week()
+    with quiz_lock:
+        if os.path.exists(QUIZ_STATE["scores_file"]):
+            try:
+                with open(QUIZ_STATE["scores_file"], "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    if "week" in data and "scores" in data:
+                        if data.get("week") != current_week:
+                            reset_payload = {"week": current_week, "scores": {}}
+                            with open(QUIZ_STATE["scores_file"], "w", encoding="utf-8") as fw:
+                                json.dump(reset_payload, fw, ensure_ascii=False, indent=2)
+                            return {}
+                        return data.get("scores", {})
+                    else:
+                        migrated_payload = {"week": current_week, "scores": data}
+                        with open(QUIZ_STATE["scores_file"], "w", encoding="utf-8") as fw:
+                            json.dump(migrated_payload, fw, ensure_ascii=False, indent=2)
+                        return data
+            except Exception:
+                return {}
+    return {}
+
+def save_quiz_scores(scores):
+    current_week = get_current_iso_week()
+    payload = {
+        "week": current_week,
+        "scores": scores
+    }
+    with quiz_lock:
+        try:
+            with open(QUIZ_STATE["scores_file"], "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"Ошибка сохранения очков квиза: {e}")
+
+def add_quiz_score(user_id, user_name, points=10):
+    with quiz_lock:
+        scores = load_quiz_scores()
+        uid = str(user_id)
+        if uid not in scores:
+            scores[uid] = {"name": user_name, "points": 0}
+        scores[uid]["points"] += points
+        scores[uid]["name"] = user_name
+        save_quiz_scores(scores)
+        return scores[uid]["points"]
+
+def generate_quiz_questions(theme="общая эрудиция, искусство, культура и история"):
+    prompt = (
+        f"Сгенерируй ровно 10 увлекательных вопросов для интеллектуальной викторины. "
+        f"Тематика: {theme}. "
+        f"ТРЕБОВАНИЯ К СЛОЖНОСТИ И ПРОВЕРКЕ ФАКТОВ:\n"
+        f"1. Вопросы должны выстраиваться СТРОГО по возрастанию сложности: от простых базовых фактов в начале (вопросы 1–3) "
+        f"к вопросам средней сложности (4–7) и самым сложным, редким и неочевидным фактам к 10-му вопросу.\n"
+        f"2. Проведи строгую внутреннюю самопроверку каждого вопроса: правильный ответ (correct_idx) должен быть "
+        f"абсолютно фактологически точным, однозначным и непротиворечивым, а остальные 3 варианта — заведомо неверными, но правдоподобными.\n\n"
+        f"Ответь СТРОГО валидным JSON-списком объектов без markdown-блоков: "
+        f'['
+        f'  {{"question": "Текст вопроса", "options": ["Вариант A", "Вариант B", "Вариант C", "Вариант D"], "correct_idx": 0, "comment": "Короткий факт или пояснение к ответу"}}'
+        f']'
+    )
+    try:
+        response = client.models.generate_content(
+            model="models/gemini-2.5-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json"
+            )
+        )
+        text = (response.text or "").strip()
+        if text.startswith("```"):
+            lines = text.splitlines()
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].startswith("```"):
+                lines = lines[:-1]
+            text = "\n".join(lines).strip()
+        data = json.loads(text)
+        return data if isinstance(data, list) else []
+    except Exception as e:
+        print(f"Ошибка генерации вопросов: {e}")
+        return []
+
+def run_quiz_game(admin_chat_id, target_chat_id):
+    try:
+        questions = generate_quiz_questions()
+        if not questions:
+            bot.send_message(admin_chat_id, "Не удалось сформировать вопросы. Попробуйте еще раз.")
+            return
+
+        with quiz_lock:
+            if not QUIZ_STATE["is_running"]:
+                return
+            QUIZ_STATE["questions"] = questions
+
+        bot.send_message(
+            target_chat_id,
+            "🎭 <b>Интеллектуальная викторина начинается!</b>\n\n"
+            "Правила: на каждый вопрос даётся <b>25 секунд</b>.\n"
+            "Баллы (+10) получает тот, кто ответит правильно <b>быстрее всех</b>.\n"
+            "Очки суммируются за весь сезон до достижения 100 баллов. Первый, кто наберёт 100 баллов, получает кубок и приз в 100 звёзд!\n\n"
+            "<i>Первый вопрос через 5 секунд...</i>",
+            parse_mode="HTML"
+        )
+        time.sleep(5)
+
+        for i, q in enumerate(QUIZ_STATE["questions"], start=1):
+            with quiz_lock:
+                if not QUIZ_STATE["is_running"]:
+                    break
+                QUIZ_STATE["current_question"] = i
+                QUIZ_STATE["answers"] = {}
+
+            options = q.get("options", [])
+            correct_idx = int(q.get("correct_idx", 0))
+            if not options or correct_idx >= len(options):
+                continue
+
+            markup = telebot.types.InlineKeyboardMarkup(row_width=2)
+            buttons = []
+            for idx, opt in enumerate(options):
+                buttons.append(
+                    telebot.types.InlineKeyboardButton(
+                        text=f"{chr(65+idx)}) {opt}",
+                        callback_data=f"quiz_ans:{i}:{idx}"
+                    )
+                )
+            markup.add(*buttons)
+
+            msg_text = (
+                f"<b>Вопрос №{i} из {len(QUIZ_STATE['questions'])}</b> (время: 25 сек):\n\n"
+                f"<b>{q.get('question', 'Вопрос')}</b>"
+            )
+            try:
+                q_msg = bot.send_message(target_chat_id, msg_text, reply_markup=markup, parse_mode="HTML")
+            except Exception as e:
+                print(f"Ошибка отправки вопроса: {e}")
+                continue
+
+            for _ in range(25):
+                with quiz_lock:
+                    if not QUIZ_STATE["is_running"]:
+                        break
+                time.sleep(1)
+
+            try:
+                bot.edit_message_reply_markup(target_chat_id, q_msg.message_id, reply_markup=None)
+            except Exception:
+                pass
+
+            with quiz_lock:
+                if not QUIZ_STATE["is_running"]:
+                    break
+                current_answers = list(QUIZ_STATE["answers"].values())
+
+            correct_answers = [
+                data for data in current_answers
+                if data["option"] == correct_idx
+            ]
+            correct_answers.sort(key=lambda x: x["time"])
+
+            correct_opt_letter = chr(65 + correct_idx)
+            correct_opt_text = options[correct_idx]
+
+            if correct_answers:
+                first_correct = correct_answers[0]
+                total_score = add_quiz_score(first_correct["user_id"], first_correct["name"], points=10)
+                res_text = (
+                    f"⏱ <b>Время вышло!</b>\n"
+                    f"Правильный ответ: <b>{correct_opt_letter}) {correct_opt_text}</b>\n\n"
+                    f"⚡️ Первым правильно ответил: <b>{first_correct['name']}</b> (+10 баллов)!\n"
+                    f"Текущий счёт: <b>{total_score}</b> баллов.\n"
+                    f"<i>{q.get('comment', '')}</i>"
+                )
+                bot.send_message(target_chat_id, res_text, parse_mode="HTML")
+
+                if total_score >= QUIZ_STATE["target_score"]:
+                    bot.send_message(
+                        target_chat_id,
+                        f"🏆 <b>У нас есть абсолютный победитель!</b>\n\n"
+                        f"Участник <b>{first_correct['name']}</b> первым набрал {total_score} баллов и забирает кубок и приз в <b>100 звёзд</b>! 🎉",
+                        parse_mode="HTML"
+                    )
+                    break
+            else:
+                res_text = (
+                    f"⏱ <b>Время вышло!</b>\n"
+                    f"Правильный ответ: <b>{correct_opt_letter}) {correct_opt_text}</b>\n\n"
+                    f"Никто не успел дать правильный ответ.\n"
+                    f"<i>{q.get('comment', '')}</i>"
+                )
+                bot.send_message(target_chat_id, res_text, parse_mode="HTML")
+
+            time.sleep(3)
+
+        with quiz_lock:
+            is_still_running = QUIZ_STATE["is_running"]
+
+        if is_still_running:
+            scores = load_quiz_scores()
+            sorted_scores = sorted(scores.values(), key=lambda x: x["points"], reverse=True)[:10]
+            leaders_text = "\n".join([f"{idx+1}. {p['name']} — {p['points']} баллов" for idx, p in enumerate(sorted_scores)])
+
+            leaderboard_msg = bot.send_message(
+                target_chat_id,
+                f"📊 <b>Викторина завершена!</b>\n\n"
+                f"<b>Топ участников сезона:</b>\n{leaders_text or 'Пока никто не набрал баллы'}",
+                parse_mode="HTML"
+            )
+            Thread(target=delete_later, args=(target_chat_id, leaderboard_msg.message_id, 3600)).start()
+    except Exception as e:
+        print(f"Ошибка во время проведения викторины: {e}")
+    finally:
+        with quiz_lock:
+            QUIZ_STATE["is_running"] = False
+            QUIZ_STATE["answers"] = {}
+            QUIZ_STATE["current_question"] = 0
 
 def get_forward_info(message):
     if getattr(message, 'forward_from_chat', None):
@@ -88,7 +369,7 @@ def process_channel_forward(chat_id, message, orig_msg_id):
     post_text = message.text or message.caption or "Новая публикация в канале."
     try:
         bot.delete_message(chat_id, message.message_id)
-    except Exception as e:
+    except Exception:
         pass
 
     post_link = f"https://t.me/{CHANNEL_USERNAME}/{orig_msg_id}" if orig_msg_id else f"https://t.me/{CHANNEL_USERNAME}"
@@ -126,6 +407,9 @@ def process_channel_forward(chat_id, message, orig_msg_id):
         print(f"Ошибка отправки: {e}")
 
 def extract_media_part(message):
+    if not message:
+        return None
+
     media = None
     mime_type = None
 
@@ -159,7 +443,7 @@ def extract_media_part(message):
     if not media:
         return None
 
-    file_size = getattr(media, 'file_size', 0)
+    file_size = getattr(media, 'file_size', 0) or 0
     if file_size > 20 * 1024 * 1024:
         return None
 
@@ -167,8 +451,28 @@ def extract_media_part(message):
         file_info = bot.get_file(media.file_id)
         downloaded = bot.download_file(file_info.file_path)
         return types.Part.from_bytes(data=downloaded, mime_type=mime_type)
-    except Exception:
+    except Exception as e:
+        print(f"Ошибка скачивания медиафайла: {e}")
         return None
+
+def send_long_message(chat_id, message, text, chat_type):
+    max_len = 4096
+    chunks = [text[i:i + max_len] for i in range(0, len(text), max_len)] or [text]
+    for idx, chunk in enumerate(chunks):
+        try:
+            if chat_type == 'channel' or idx > 0:
+                bot.send_message(chat_id, chunk, parse_mode="HTML")
+            else:
+                bot.reply_to(message, chunk, parse_mode="HTML")
+        except Exception as e:
+            print(f"Ошибка форматирования HTML, отправка без разметки: {e}")
+            try:
+                if chat_type == 'channel' or idx > 0:
+                    bot.send_message(chat_id, chunk)
+                else:
+                    bot.reply_to(message, chunk)
+            except Exception as inner_e:
+                print(f"Ошибка отправки сообщения: {inner_e}")
 
 def process_ai_response(chat_id, message_id, message, contents, chat_type):
     history_data = load_history(chat_id)
@@ -182,59 +486,157 @@ def process_ai_response(chat_id, message_id, message, contents, chat_type):
             history=history_data
         )
         
-        gemini_response = chat.send_message(contents).text
-        time.sleep(3)
+        response = chat.send_message(contents)
+        gemini_response = (response.text or "").strip()
+        if not gemini_response:
+            gemini_response = "Не удалось сформировать ответ."
     except Exception as e:
         print(f"Ошибка API Gemini: {e}")
-        bot.send_message(chat_id, f"Произошла ошибка при обращении к мозгам бота: {e}")
+        try:
+            bot.send_message(chat_id, f"Произошла ошибка при обращении к мозгам бота: {e}")
+        except Exception:
+            pass
         return
 
-    try:
-        if chat_type == 'channel':
-            bot.send_message(chat_id, gemini_response, parse_mode="HTML")
-        else:
-            bot.reply_to(message, gemini_response, parse_mode="HTML")
-    except Exception as e:
-        print(f"Ошибка форматирования HTML, отправка без разметки: {e}")
-        if chat_type == 'channel':
-            bot.send_message(chat_id, gemini_response)
-        else:
-            bot.reply_to(message, gemini_response)
+    send_long_message(chat_id, message, gemini_response, chat_type)
 
     if message.photo and chat_type != 'private':
         user_caption = message.caption or ""
-        if "#конкурс" in user_caption.lower() and "работа принята на конкурс" in gemini_response.lower():
-            author = message.from_user.first_name or "Участник"
-            username = f" (@{message.from_user.username})" if message.from_user.username else ""
-            try:
-                bot.send_photo(
-                    chat_id=CONTEST_APPROVED_CHAT_ID,
-                    photo=message.photo[-1].file_id,
-                    caption=f"✅ Одобрено на конкурс!\nАвтор: {author}{username}\n\nВердикт жюри:\n{gemini_response}"
-                )
-            except Exception:
-                pass
+        if "#конкурс" in user_caption.lower():
+            resp_lower = gemini_response.lower()
+            is_approved = (
+                "работа принята на конкурс" in resp_lower
+                and "работа не принята" not in resp_lower
+                and "отказано" not in resp_lower
+            )
+            if is_approved:
+                author = (message.from_user.first_name if message.from_user else None) or "Участник"
+                username = f" (@{message.from_user.username})" if (message.from_user and message.from_user.username) else ""
+                caption_text = f"✅ Одобрено на конкурс!\nАвтор: {author}{username}\n\nВердикт жюри:\n{gemini_response}"
+                if len(caption_text) > 1024:
+                    caption_text = caption_text[:1020] + "..."
+                try:
+                    bot.send_photo(
+                        chat_id=CONTEST_APPROVED_CHAT_ID,
+                        photo=message.photo[-1].file_id,
+                        caption=caption_text
+                    )
+                except Exception as e:
+                    print(f"Ошибка пересылки конкурсного фото: {e}")
+            else:
+                Thread(target=delete_later, args=(chat_id, message.message_id, 120)).start()
 
     new_history = []
-    for msg in chat.get_history():
-        text_parts = [part.text for part in msg.parts if part.text]
-        if text_parts:
-            new_history.append({
-                "role": msg.role,
-                "parts": [{"text": "\n".join(text_parts)}]
-            })
-    save_history(chat_id, new_history)
+    try:
+        for msg in chat.get_history():
+            parts_list = getattr(msg, 'parts', None) or []
+            text_parts = [
+                part.text for part in parts_list
+                if getattr(part, 'text', None) and not getattr(part, 'thought', False)
+            ]
+            if text_parts and msg.role in ("user", "model"):
+                new_history.append({
+                    "role": msg.role,
+                    "parts": [{"text": "\n".join(text_parts)}]
+                })
+        save_history(chat_id, new_history)
+    except Exception as e:
+        print(f"Ошибка обработки истории чата: {e}")
 
 @app.route('/' + TOKEN, methods=['POST'])
 def webhook():
-    json_str = request.get_data().decode('UTF-8')
-    update = telebot.types.Update.de_json(json_str)
+    try:
+        json_str = request.get_data().decode('UTF-8')
+        update = telebot.types.Update.de_json(json_str)
+    except Exception as e:
+        print(f"Ошибка разбора Update: {e}")
+        return '!', 200
+
+    if update.callback_query:
+        cq = update.callback_query
+        data = cq.data or ""
+        if data.startswith("quiz_ans:"):
+            parts = data.split(":")
+            if len(parts) != 3:
+                return '!', 200
+            try:
+                q_num = int(parts[1])
+                chosen_opt = int(parts[2])
+            except ValueError:
+                return '!', 200
+
+            uid = cq.from_user.id
+            uname = cq.from_user.first_name or "Участник"
+
+            with quiz_lock:
+                if not QUIZ_STATE["is_running"] or q_num != QUIZ_STATE["current_question"]:
+                    try:
+                        bot.answer_callback_query(cq.id, "Время на этот вопрос уже истекло!", show_alert=False)
+                    except Exception:
+                        pass
+                    return '!', 200
+
+                try:
+                    if uid in QUIZ_STATE["answers"]:
+                        bot.answer_callback_query(cq.id, "Вы уже дали ответ на этот вопрос!", show_alert=False)
+                    else:
+                        QUIZ_STATE["answers"][uid] = {
+                            "user_id": uid,
+                            "name": uname,
+                            "option": chosen_opt,
+                            "time": time.time()
+                        }
+                        bot.answer_callback_query(cq.id, "Ответ принят!", show_alert=False)
+                except Exception as e:
+                    print(f"Ошибка ответа на callback_query: {e}")
+            return '!', 200
 
     if update.message:
         chat_id = update.message.chat.id
         chat_type = update.message.chat.type
         message = update.message
         user_id = message.from_user.id if message.from_user else None
+        user_text = message.caption or message.text or ""
+
+        cmd_clean = user_text.strip().lower().split('@')[0]
+
+        if user_id == ADMIN_ID and cmd_clean in ['/quiz_stop', '!стопквиз']:
+            with quiz_lock:
+                QUIZ_STATE["is_running"] = False
+            bot.send_message(chat_id, "🛑 Викторина принудительно остановлена.")
+            return '!', 200
+
+        if cmd_clean in ['/quiz_top', '!топквиз']:
+            if chat_type == 'private' and user_id != ADMIN_ID:
+                return '!', 200
+            if chat_type in ['group', 'supergroup', 'channel'] and chat_id not in ALLOWED_GROUP_IDS:
+                return '!', 200
+            scores = load_quiz_scores()
+            sorted_scores = sorted(scores.values(), key=lambda x: x["points"], reverse=True)[:10]
+            leaders_text = "\n".join(
+                [f"{idx+1}. {p['name']} — {p['points']} баллов" for idx, p in enumerate(sorted_scores)]
+            )
+            bot.send_message(
+                chat_id,
+                f"🏆 <b>Топ-10 участников сезона:</b>\n\n"
+                f"{leaders_text or 'Пока никто не набрал баллы'}",
+                parse_mode="HTML"
+            )
+            return '!', 200
+
+        if user_id == ADMIN_ID and cmd_clean in ['/quiz', '!квиз', 'квиз']:
+            with quiz_lock:
+                if QUIZ_STATE["is_running"]:
+                    bot.send_message(chat_id, "Викторина уже запущена.")
+                    return '!', 200
+                QUIZ_STATE["is_running"] = True
+                QUIZ_STATE["current_question"] = 0
+                QUIZ_STATE["answers"] = {}
+
+            target_chat = BREST_TALK_ID if chat_type == 'private' else chat_id
+            bot.send_message(chat_id, "Формирую вопросы викторины через Gemini...")
+            Thread(target=run_quiz_game, args=(chat_id, target_chat)).start()
+            return '!', 200
 
         if chat_type == 'private':
             if user_id == ADMIN_ID:
@@ -242,11 +644,16 @@ def webhook():
                     bot.send_message(chat_id, "Приветствую, шеф.")
                     return '!', 200
 
-                bot.send_chat_action(chat_id, 'typing')
+                try:
+                    bot.send_chat_action(chat_id, 'typing')
+                except Exception:
+                    pass
+
                 media_part = extract_media_part(message)
+                if not media_part and message.reply_to_message:
+                    media_part = extract_media_part(message.reply_to_message)
+
                 contents = []
-                user_text = message.caption or message.text or ""
-                
                 is_kaleidoscope_cmd = any(word in user_text.lower() for word in ["калейдоскоп", "оформи"])
 
                 reply_text = ""
@@ -297,8 +704,27 @@ def webhook():
                 thread = Thread(target=process_ai_response, args=(chat_id, message.message_id, message, contents, chat_type))
                 thread.start()
                 return '!', 200
-            
-            return '!', 200
+            else:
+                if cmd_clean == '/start':
+                    bot.send_message(
+                        chat_id,
+                        "Здравствуйте! Вы можете присылать сюда свои материалы, тексты, фото и идеи для канала «Калейдоскоп»."
+                    )
+                    return '!', 200
+
+                try:
+                    bot.forward_message(FORWARD_CHAT_ID, chat_id, message.message_id)
+                except Exception:
+                    try:
+                        bot.copy_message(FORWARD_CHAT_ID, chat_id, message.message_id)
+                    except Exception as e:
+                        print(f"Ошибка пересылки материала от пользователя: {e}")
+
+                try:
+                    bot.send_message(chat_id, "Спасибо! Ваш материал принят на рассмотрение редакции.")
+                except Exception as e:
+                    print(f"Ошибка отправки подтверждения пользователю: {e}")
+                return '!', 200
 
         if chat_type in ['group', 'supergroup', 'channel']:
             if chat_id not in ALLOWED_GROUP_IDS:
@@ -311,21 +737,32 @@ def webhook():
                 thread.start()
                 return '!', 200
 
-            user_text = message.text or message.caption or ""
-            
             if chat_type != 'channel':
-                is_reply_to_bot = (
-                    message.reply_to_message and 
-                    message.reply_to_message.from_user.id == bot.get_me().id
-                )
-                bot_username = f"@{bot.get_me().username}".lower()
-                is_mentioned = bot_username in user_text.lower()
-                is_contest = "#конкурс" in user_text.lower()
+                is_contest = bool(message.photo and "#конкурс" in user_text.lower())
 
-                if not (is_reply_to_bot or is_mentioned or is_contest):
-                    return '!', 200
+                if chat_id == BREST_TALK_ID:
+                    if not is_contest:
+                        return '!', 200
+                else:
+                    bot_info = get_bot_info()
+                    bot_id = bot_info.id if bot_info else None
+                    bot_username = f"@{bot_info.username}".lower() if (bot_info and bot_info.username) else ""
 
-            bot.send_chat_action(chat_id, 'typing')
+                    is_reply_to_bot = bool(
+                        message.reply_to_message
+                        and message.reply_to_message.from_user
+                        and bot_id is not None
+                        and message.reply_to_message.from_user.id == bot_id
+                    )
+                    is_mentioned = bool(bot_username and bot_username in user_text.lower())
+
+                    if not (is_reply_to_bot or is_mentioned or is_contest):
+                        return '!', 200
+
+            try:
+                bot.send_chat_action(chat_id, 'typing')
+            except Exception:
+                pass
             
             reply_text = ""
             if message.reply_to_message:
@@ -344,6 +781,8 @@ def webhook():
                 contents.append("Взгляни на это.")
 
             media_part = extract_media_part(message)
+            if not media_part and message.reply_to_message:
+                media_part = extract_media_part(message.reply_to_message)
             if media_part:
                 contents.append(media_part)
 
@@ -353,6 +792,9 @@ def webhook():
     return '!', 200
 
 if __name__ == "__main__":
-    bot.remove_webhook()
-    bot.set_webhook(url=os.environ.get('RENDER_EXTERNAL_URL') + '/' + TOKEN)
+    render_url = (os.environ.get('RENDER_EXTERNAL_URL') or '').rstrip('/')
+    if render_url and TOKEN:
+        bot.remove_webhook()
+        time.sleep(0.5)
+        bot.set_webhook(url=f"{render_url}/{TOKEN}")
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
