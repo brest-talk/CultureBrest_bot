@@ -46,13 +46,20 @@ QUIZ_STATE = {
     "current_question": 0,
     "questions": [],
     "answers": {},
-    "scores_file": "quiz_scores.json",
-    "prizes": {
-        1: 50,
-        2: 30,
-        3: 20
-    }
+    "scores_file": "quiz_scores.json"
 }
+
+def get_star_prize_by_points(points):
+    if points >= 100:
+        return "100 ⭐️ 🏆"
+    elif points >= 50:
+        return "50 ⭐️ 🚀"
+    elif points >= 25:
+        return "25 ⭐️ 🎁"
+    elif points >= 15:
+        return "15 ⭐️ 🧸"
+    else:
+        return "0 звёзд (без приза)"
 
 SYSTEM_INSTRUCTION = """Ты — глубокий, многогранный интеллектуал, уважаемый старожил, опытный редактор и философ-наблюдатель с огромным жизненным багажом. Твой характер сложен и интересен: ты можешь быть тонким ироничным мыслителем, строгим эстетом или чутким наставником, но всегда сохраняешь свою суть — человека, который видит мир насквозь, обладает широчайшим кругозором, но продолжает любить людей. 
 Твой стиль — это литература высшей пробы. Тонкая ирония, эрудиция, спокойное достоинство и безупречный, богатый русский язык без лишней эмоциональности и суеты. Строго никаких смайликов и эмодзи.
@@ -254,19 +261,20 @@ def run_quiz_game(admin_chat_id, target_chat_id):
             QUIZ_STATE["questions"] = questions
             save_quiz_scores({})
 
-        prizes = QUIZ_STATE["prizes"]
         bot.send_message(
             target_chat_id,
             f"🎭 <b>Интеллектуальная викторина начинается!</b>\n\n"
             f"Правила:\n"
-            f"• Всего <b>{len(questions)} вопросов</b> по возрастанию сложности.\n"
+            f"• Всего <b>{len(questions)} вопросов</b> по возрастанию сложности (длительность квиза — <b>20 минут</b>).\n"
             f"• На каждый вопрос даётся <b>30 секунд</b>.\n"
             f"• Баллы (+10) получает тот, кто ответит правильно <b>быстрее всех</b>.\n"
-            f"• Пауза между вопросами — <b>2 минуты</b> для обсуждения.\n"
-            f"• По итогам текущей игры определяются <b>3 финалиста</b>, которые разделят призовой фонд в <b>Telegram Stars</b>:\n"
-            f"  🥇 1 место — <b>{prizes[1]} ⭐️</b>\n"
-            f"  🥈 2 место — <b>{prizes[2]} ⭐️</b>\n"
-            f"  🥉 3 место — <b>{prizes[3]} ⭐️</b>\n\n"
+            f"• Пауза между вопросами — <b>1.5 минуты</b> для обсуждения.\n"
+            f"• Призы для <b>топ-3 финалистов</b> зависят от набранных баллов по витрине Telegram (15 ⭐️ 🧸, 25 ⭐️ 🎁, 50 ⭐️ 🚀, максимум — 100 ⭐️ 🏆):\n"
+            f"  • 100 баллов = <b>100 ⭐️ 🏆</b>\n"
+            f"  • от 50 до 90 баллов = <b>50 ⭐️ 🚀</b>\n"
+            f"  • от 25 до 40 баллов = <b>25 ⭐️ 🎁</b>\n"
+            f"  • от 15 до 20 баллов = <b>15 ⭐️ 🧸</b>\n"
+            f"  • менее 15 баллов = <b>0 звёзд (без приза)</b>\n\n"
             f"<i>Первый вопрос через 5 секунд...</i>",
             parse_mode="HTML"
         )
@@ -330,7 +338,7 @@ def run_quiz_game(admin_chat_id, target_chat_id):
 
             correct_opt_letter = chr(65 + correct_idx)
             correct_opt_text = options[correct_idx]
-            next_q_note = "\n\n⏳ <i>Следующий вопрос через 2 минуты...</i>" if i < total_q else ""
+            next_q_note = "\n\n⏳ <i>Следующий вопрос через 1,5 минуты...</i>" if i < total_q else ""
 
             if correct_answers:
                 first_correct = correct_answers[0]
@@ -355,7 +363,7 @@ def run_quiz_game(admin_chat_id, target_chat_id):
                 bot.send_message(target_chat_id, res_text, parse_mode="HTML")
 
             if i < total_q:
-                for _ in range(120):
+                for _ in range(90):
                     with quiz_lock:
                         if not QUIZ_STATE["is_running"]:
                             break
@@ -377,11 +385,11 @@ def run_quiz_game(admin_chat_id, target_chat_id):
             if finalists:
                 finalists_lines = []
                 for place, p in enumerate(finalists, start=1):
-                    star_prize = prizes.get(place, 0)
+                    prize_str = get_star_prize_by_points(p["points"])
                     medal = medals.get(place, f"{place}.")
                     finalists_lines.append(
                         f"{medal} <b>{place} место:</b> {p['name']} — <b>{p['points']} баллов</b> "
-                        f"(Приз: <b>{star_prize} Telegram Stars ⭐️</b>)"
+                        f"(Приз: <b>{prize_str}</b>)"
                     )
                 finalists_text = "\n".join(finalists_lines)
 
@@ -396,10 +404,10 @@ def run_quiz_game(admin_chat_id, target_chat_id):
 
                 final_msg_text = (
                     f"🏁 <b>Викторина завершена! Итоги игры:</b>\n\n"
-                    f"🏆 <b>Тройка финалистов и распределение призового фонда:</b>\n"
+                    f"🏆 <b>Тройка финалистов и награды:</b>\n"
                     f"{finalists_text}"
                     f"{others_text}\n\n"
-                    f"🎉 Поздравляем победителей! Администратор свяжется с финалистами для вручения Telegram Stars."
+                    f"🎉 Поздравляем финалистов!"
                 )
             else:
                 final_msg_text = (
@@ -704,7 +712,7 @@ def webhook():
                 QUIZ_STATE["answers"] = {}
 
             target_chat = BREST_TALK_ID if chat_type == 'private' else chat_id
-            bot.send_message(chat_id, "Формирую вопросы викторины через Gemini...")
+            bot.send_message(chat_id, "🧩 Квиз запущен! Игра скоро начнется... ⏳")
             Thread(target=run_quiz_game, args=(chat_id, target_chat)).start()
             return '!', 200
 
