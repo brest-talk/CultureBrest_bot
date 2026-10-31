@@ -24,6 +24,13 @@ ALLOWED_GROUP_IDS = [-1004415639090, -1004392588464, -1003555258619]
 
 MAX_HISTORY_MESSAGES = 30
 
+DATA_DIR = "/data"
+if not os.path.exists(DATA_DIR):
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+    except Exception:
+        DATA_DIR = "."
+
 bot = telebot.TeleBot(TOKEN)
 client = genai.Client(api_key=GEMINI_API_KEY)
 app = Flask(__name__)
@@ -47,7 +54,7 @@ QUIZ_STATE = {
     "current_question": 0,
     "questions": [],
     "answers": {},
-    "scores_file": "quiz_scores.json"
+    "scores_file": os.path.join(DATA_DIR, "quiz_scores.json")
 }
 
 def get_star_prize_by_points(points):
@@ -107,7 +114,7 @@ def delete_later(chat_id, message_id, delay=3600):
         pass
 
 def load_history(chat_id):
-    filename = f"history_{chat_id}.json"
+    filename = os.path.join(DATA_DIR, f"history_{chat_id}.json")
     with history_lock:
         if os.path.exists(filename):
             try:
@@ -131,7 +138,7 @@ def load_history(chat_id):
     return []
 
 def save_history(chat_id, history):
-    filename = f"history_{chat_id}.json"
+    filename = os.path.join(DATA_DIR, f"history_{chat_id}.json")
     trimmed = history[-MAX_HISTORY_MESSAGES:]
     while trimmed and trimmed[0].get("role") != "user":
         trimmed.pop(0)
@@ -176,7 +183,7 @@ def add_quiz_score(user_id, user_name, points=10):
         save_quiz_scores(scores)
         return scores[uid]["points"]
 
-USED_QUESTIONS_FILE = "used_quiz_questions.json"
+USED_QUESTIONS_FILE = os.path.join(DATA_DIR, "used_quiz_questions.json")
 
 def load_used_questions():
     with quiz_lock:
