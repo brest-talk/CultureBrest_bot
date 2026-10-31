@@ -54,6 +54,7 @@ QUIZ_STATE = {
     "current_question": 0,
     "questions": [],
     "answers": {},
+    "correct_counts": {},
     "scores_file": os.path.join(DATA_DIR, "quiz_scores.json")
 }
 
@@ -119,10 +120,6 @@ def unpin_and_delete_later(chat_id, message_id, delay=3600):
         bot.unpin_chat_message(chat_id, message_id)
     except Exception as e:
         print(f"Ошибка при откреплении сообщения: {e}")
-    try:
-        bot.delete_message(chat_id, message_id)
-    except Exception:
-        pass
 
 def load_history(chat_id):
     filename = os.path.join(DATA_DIR, f"history_{chat_id}.json")
@@ -243,20 +240,24 @@ def generate_quiz_questions():
         )
 
     prompt = (
-        f"Сгенерируй ровно 10 вопросов для живой групповой викторины в чате. "
+        f"Сгенерируй ровно 11 вопросов для живой групповой викторины в чате. "
         f"Используй микс из этих сфер: {selected_topics}.\n\n"
         f"ЖЕСТКАЯ ГРАДАЦИЯ СЛОЖНОСТИ (критически важно соблюсти контраст!):\n"
-        f"• Вопросы 1–3 (УРОВЕНЬ: ЭЛЕМЕНТАРНЫЙ РАЗГОН): Очень лёгкие, бытовые или поп-культурные вопросы, "
-        f"на которые 95% обычных взрослых людей ответят за 3 секунды без раздумий. "
-        f"(Примеры уровня: известные фильмы, популярная еда, столицы, очевидные поговорки, базовые явления природы. Никаких дат и узких терминов!).\n"
-        f"• Вопросы 4–7 (УРОВЕНЬ: СРЕДНИЙ): Интересные вопросы на кругозор и смекалку, где нужно немного подумать, "
+        f"• Вопросы 1–2 (УРОВЕНЬ: УЛЬТРА-ЛЕГКИЙ РАЗОГРЕВ): Максимально простые и мгновенно понятные вопросы для разогрева, "
+        f"на которые любой человек ответит за 1–2 секунды вообще без раздумий.\n"
+        f"• Вопросы 3–4 (УРОВЕНЬ: ЭЛЕМЕНТАРНЫЙ): Очень лёгкие, бытовые или поп-культурные вопросы, "
+        f"на которые 95% обычных взрослых людей ответят за 3 секунды. "
+        f"(Примеры: известные фильмы, популярная еда, столицы, очевидные поговорки, базовые явления природы. Никаких дат и узких терминов!).\n"
+        f"• Вопросы 5–8 (УРОВЕНЬ: СРЕДНЯЯ СЛОЖНОСТЬ): Интересные вопросы на кругозор и смекалку, где нужно немного подумать, "
         f"но ответ известен образованному человеку.\n"
-        f"• Вопросы 8–10 (УРОВЕНЬ: ХАРДКОР / ЧГК): Редкие, парадоксальные и неочевидные факты для настоящих эрудитов.\n\n"
+        f"• Вопросы 9–10 (УРОВЕНЬ: ХАРДКОР / ЧГК): Редкие, парадоксальные и неочевидные факты для настоящих эрудитов.\n"
+        f"• Вопрос 11 (УРОВЕНЬ: СУПЕР-ВОПРОС / УЛЬТРА-ХАРДКОР / ФИНАЛ): Финальный супер-вопрос повышенной сложности! "
+        f"Исключительно редкий, красивый парадокс или головоломный факт высшей лиги для определения абсолютного чемпиона.\n\n"
         f"ПРАВИЛА ПРОВЕРКИ:\n"
         f"1. Каждый вопрос должен иметь ровно 4 варианта ответа и только ОДИН 100% достоверный правильный ответ (correct_idx от 0 до 3).\n"
         f"2. Не делай правильный ответ самым длинным или выделяющимся по стилю.\n"
         f"{avoid_block}\n"
-        f"Ответь СТРОГО валидным JSON-списком из 10 объектов без markdown-блоков:\n"
+        f"Ответь СТРОГО валидным JSON-списком из 11 объектов без markdown-блоков:\n"
         f'[\n'
         f'  {{"question": "Текст вопроса", "options": ["Вариант 1", "Вариант 2", "Вариант 3", "Вариант 4"], "correct_idx": 0, "comment": "Короткий интересный факт к ответу"}}\n'
         f']'
@@ -318,6 +319,8 @@ def generate_quiz_questions():
             else:
                 print(f"Пропущен некорректный вопрос #{idx}: {item}")
 
+        valid_questions = valid_questions[:11]
+
         if valid_questions:
             save_used_questions(valid_questions)
         else:
@@ -342,15 +345,18 @@ def run_quiz_game(admin_chat_id, target_chat_id):
             if not QUIZ_STATE["is_running"]:
                 return
             QUIZ_STATE["questions"] = questions
+            QUIZ_STATE["correct_counts"] = {}
             save_quiz_scores({})
 
         bot.send_message(
             target_chat_id,
             "🎭 <b>Викторина начинается!</b>\n\n"
-            "• <b>10 вопросов</b> (20 минут на всю игру)\n"
+            "• <b>11 вопросов</b> (включая финальный супер-вопрос!)\n"
             "• <b>30 секунд</b> на ответ | Пауза <b>1.5 минуты</b>\n"
             "• Баллы (+10) забирает тот, кто ответит правильно и <b>быстрее всех</b>\n"
-            "• Награды для топ-3 из витрины Telegram:\n"
+            "• 🎬 <b>СУПЕР-ПРИЗ (11 из 11):</b> Тот, кто ответит правильно <b>абсолютно на все 11 вопросов без единой ошибки</b>, "
+            "получает главный супер-приз — <b>два билета в кино</b> 🎬🎟️!\n"
+            "• Награды для топ-3 по баллам из витрины Telegram:\n"
             "  • от 10 баллов = 15 ⭐️ 🧸\n"
             "  • от 25 баллов = 25 ⭐️ 🎁\n"
             "  • от 50 баллов = 50 ⭐️ 🚀\n"
@@ -388,8 +394,13 @@ def run_quiz_game(admin_chat_id, target_chat_id):
                 )
             markup.add(*buttons)
 
+            q_header = (
+                f"🔥 <b>СУПЕР-ВОПРОС №{i} из {total_q}</b> (время: 30 сек):"
+                if i == total_q
+                else f"<b>Вопрос №{i} из {total_q}</b> (время: 30 сек):"
+            )
             msg_text = (
-                f"<b>Вопрос №{i} из {total_q}</b> (время: 30 сек):\n\n"
+                f"{q_header}\n\n"
                 f"<b>{q.get('question', 'Вопрос')}</b>"
             )
             try:
@@ -419,6 +430,18 @@ def run_quiz_game(admin_chat_id, target_chat_id):
                 if data["option"] == correct_idx
             ]
             correct_answers.sort(key=lambda x: x["time"])
+
+            # Фиксируем правильные ответы для отслеживания 11 из 11 подряд без ошибок
+            with quiz_lock:
+                for ans in correct_answers:
+                    uid_str = str(ans["user_id"])
+                    if uid_str not in QUIZ_STATE["correct_counts"]:
+                        QUIZ_STATE["correct_counts"][uid_str] = {
+                            "name": ans["name"],
+                            "count": 0
+                        }
+                    QUIZ_STATE["correct_counts"][uid_str]["count"] += 1
+                    QUIZ_STATE["correct_counts"][uid_str]["name"] = ans["name"]
 
             correct_opt_letter = chr(65 + correct_idx)
             correct_opt_text = options[correct_idx]
@@ -455,6 +478,7 @@ def run_quiz_game(admin_chat_id, target_chat_id):
 
         with quiz_lock:
             is_still_running = QUIZ_STATE["is_running"]
+            correct_counts_snapshot = dict(QUIZ_STATE.get("correct_counts", {}))
 
         if is_still_running:
             scores = load_quiz_scores()
@@ -462,6 +486,28 @@ def run_quiz_game(admin_chat_id, target_chat_id):
                 scores.values(),
                 key=lambda x: (-x.get("points", 0), x.get("last_time", float("inf")))
             )
+
+            # Проверяем участников с идеальным результатом (все 11 вопросов без единой ошибки)
+            perfect_target = total_q if total_q > 0 else 11
+            perfect_players = [
+                info["name"]
+                for info in correct_counts_snapshot.values()
+                if info.get("count", 0) >= perfect_target
+            ]
+
+            if perfect_players:
+                perfect_names_str = ", ".join(f"<b>{name}</b>" for name in perfect_players)
+                super_prize_block = (
+                    f"🎬 <b>СУПЕР-ПРИЗ ({perfect_target} из {perfect_target} правильных ответов!):</b>\n"
+                    f"🌟 Безупречный результат без единой ошибки показали: {perfect_names_str}!\n"
+                    f"Главный супер-приз — <b>два билета в кино</b> 🎬🎟️ достаётся им!\n\n"
+                )
+            else:
+                super_prize_block = (
+                    f"🎬 <b>Супер-приз ({perfect_target} из {perfect_target} без ошибок):</b>\n"
+                    f"В этот раз никто не смог ответить правильно на все {perfect_target} вопросов подряд — "
+                    f"<b>два билета в кино</b> 🎬🎟️ остаются неразыгранными!\n\n"
+                )
 
             medals = {1: "🥇", 2: "🥈", 3: "🥉"}
             finalists = sorted_scores[:3]
@@ -488,6 +534,7 @@ def run_quiz_game(admin_chat_id, target_chat_id):
 
                 final_msg_text = (
                     f"🏁 <b>Викторина завершена! Итоги игры:</b>\n\n"
+                    f"{super_prize_block}"
                     f"🏆 <b>Тройка финалистов и награды:</b>\n"
                     f"{finalists_text}"
                     f"{others_text}\n\n"
@@ -495,8 +542,9 @@ def run_quiz_game(admin_chat_id, target_chat_id):
                 )
             else:
                 final_msg_text = (
-                    "📊 <b>Викторина завершена!</b>\n\n"
-                    "В этой игре никому не удалось набрать баллы. До встречи в следующем раунде!"
+                    f"📊 <b>Викторина завершена!</b>\n\n"
+                    f"{super_prize_block}"
+                    f"В этой игре никому не удалось набрать баллы. До встречи в следующем раунде!"
                 )
 
             leaderboard_msg = bot.send_message(
@@ -516,6 +564,7 @@ def run_quiz_game(admin_chat_id, target_chat_id):
         with quiz_lock:
             QUIZ_STATE["is_running"] = False
             QUIZ_STATE["answers"] = {}
+            QUIZ_STATE["correct_counts"] = {}
             QUIZ_STATE["current_question"] = 0
 
 def get_forward_info(message):
@@ -807,6 +856,7 @@ def webhook():
                 QUIZ_STATE["is_running"] = True
                 QUIZ_STATE["current_question"] = 0
                 QUIZ_STATE["answers"] = {}
+                QUIZ_STATE["correct_counts"] = {}
 
             target_chat = BREST_TALK_ID if chat_type == 'private' else chat_id
             bot.send_message(chat_id, "🧩 Квиз запущен! Игра скоро начнется...")
