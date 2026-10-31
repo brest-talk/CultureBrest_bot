@@ -76,7 +76,7 @@ SYSTEM_INSTRUCTION = """Ты — глубокий, многогранный ин
 Чтобы твои тексты не были однообразными, при каждой генерации (кроме задач технической верстки) негласно выбирай и тонко вплетай в свой ответ ОДИН из следующих акцентов:
 1. Легкий сплин: Чуть больше меланхолии и философской отстраненности, размышления о быстротечности момента.
 2. Изящный яд: Острая, но завуалированная сатира на банальность, современные нравы или человеческую суету.
-3. Эстетический абсолют: Подчеркнутое внимание к визуальным деталям, форме, свету и тени, с легким пренебрежением к безвкусице.
+3. Эстетический абсолют: Подчеркнутое внимание к визульным деталям, форме, свету и тени, с легким пренебрежением к безвкусице.
 4. Пыль веков: Внезапная, но точная отсылка к классической литературе, истории искусства или античной философии, проводящая параллель с настоящим.
 5. Парадоксальная теплота: Неожиданный проблеск искреннего сочувствия, светлой грусти или надежды сквозь привычный скепсис.
 
@@ -108,6 +108,17 @@ def get_current_date_ru():
 
 def delete_later(chat_id, message_id, delay=3600):
     time.sleep(delay)
+    try:
+        bot.delete_message(chat_id, message_id)
+    except Exception:
+        pass
+
+def unpin_and_delete_later(chat_id, message_id, delay=3600):
+    time.sleep(delay)
+    try:
+        bot.unpin_chat_message(chat_id, message_id)
+    except Exception as e:
+        print(f"Ошибка при откреплении сообщения: {e}")
     try:
         bot.delete_message(chat_id, message_id)
     except Exception:
@@ -493,7 +504,12 @@ def run_quiz_game(admin_chat_id, target_chat_id):
                 final_msg_text,
                 parse_mode="HTML"
             )
-            Thread(target=delete_later, args=(target_chat_id, leaderboard_msg.message_id, 3600)).start()
+            try:
+                bot.pin_chat_message(target_chat_id, leaderboard_msg.message_id, disable_notification=True)
+            except Exception as e:
+                print(f"Ошибка при закреплении итогового сообщения: {e}")
+
+            Thread(target=unpin_and_delete_later, args=(target_chat_id, leaderboard_msg.message_id, 3600)).start()
     except Exception as e:
         print(f"Ошибка во время проведения викторины: {e}")
     finally:
@@ -749,6 +765,10 @@ def webhook():
         cmd_clean = user_text.strip().lower().split('@')[0]
 
         if user_id == ADMIN_ID and cmd_clean == '/stop_quiz':
+            try:
+                bot.delete_message(chat_id, message.message_id)
+            except Exception:
+                pass
             with quiz_lock:
                 QUIZ_STATE["is_running"] = False
             bot.send_message(chat_id, "🛑 Викторина принудительно остановлена.")
@@ -776,6 +796,10 @@ def webhook():
             return '!', 200
 
         if user_id == ADMIN_ID and cmd_clean in ['/quiz', '!квиз', 'квиз']:
+            try:
+                bot.delete_message(chat_id, message.message_id)
+            except Exception:
+                pass
             with quiz_lock:
                 if QUIZ_STATE["is_running"]:
                     bot.send_message(chat_id, "Викторина уже запущена.")
