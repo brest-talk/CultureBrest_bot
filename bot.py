@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import random
 import re
 import time
 from datetime import datetime, timezone, timedelta
@@ -175,29 +176,82 @@ def add_quiz_score(user_id, user_name, points=10):
         save_quiz_scores(scores)
         return scores[uid]["points"]
 
-def generate_quiz_questions(theme="общая эрудиция, искусство, культура и история"):
+USED_QUESTIONS_FILE = "used_quiz_questions.json"
+
+def load_used_questions():
+    with quiz_lock:
+        if os.path.exists(USED_QUESTIONS_FILE):
+            try:
+                with open(USED_QUESTIONS_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, list):
+                    return data[-100:]  # Храним последние 100 вопросов
+            except Exception:
+                return []
+    return []
+
+def save_used_questions(new_questions):
+    with quiz_lock:
+        used = load_used_questions()
+        for q in new_questions:
+            q_text = q.get("question", "").strip()
+            if q_text and q_text not in used:
+                used.append(q_text)
+        used = used[-100:]
+        try:
+            with open(USED_QUESTIONS_FILE, "w", encoding="utf-8") as f:
+                json.dump(used, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"Ошибка сохранения истории вопросов: {e}")
+
+def generate_quiz_questions():
+    used_questions = load_used_questions()
+    
+    # Случайный набор тем для разнообразия каждой игры
+    all_topics = [
+        "кино и популярные сериалы", "география и страны", "кулинария и напитки",
+        "музыка и хиты", "животный мир и природа", "космос и изобретения",
+        "литература и крылатые фразы", "мировая история", "спорт и игры",
+        "мифы и легенды", "повседневная жизнь и быт", "архитектура и города"
+    ]
+    selected_topics = ", ".join(random.sample(all_topics, 6))
+
+    avoid_block = ""
+    if used_questions:
+        avoid_list = "\n".join(f"- {q}" for q in used_questions[-50:])
+        avoid_block = (
+            f"\nКАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО повторять или перефразировать следующие вопросы, "
+            f"а также использовать те же самые ответы/факты, что были в них:\n{avoid_list}\n"
+        )
+
     prompt = (
-        f"Сгенерируй ровно 10 увлекательных вопросов для интеллектуальной викторины. "
-        f"Тематика: {theme}. "
-        f"ТРЕБОВАНИЯ К СЛОЖНОСТИ И ПРОВЕРКЕ ФАКТОВ:\n"
-        f"1. Вопросы должны выстраиваться СТРОГО по возрастанию сложности:\n"
-        f"   - Вопросы 1–3: МАКСИМАЛЬНО ПРОСТЫЕ, лайтовые и общеизвестные факты для лёгкого старта и разогрева участников (школьная база или популярная культура).\n"
-        f"   - Вопросы 4–7: средняя сложность (требуют сообразительности и логики).\n"
-        f"   - Вопросы 8–10: сложные, редкие и неочевидным фактам для настоящих эрудитов.\n"
-        f"2. Проведи строгую внутреннюю самопроверку каждого вопроса: правильный ответ (correct_idx) должен быть "
-        f"абсолютно фактологически точным, однозначным и непротиворечивым, а остальные 3 варианта — заведомо неверными, но правдоподобными.\n\n"
-        f"Ответь СТРОГО валидным JSON-списком объектов без markdown-блоков: "
-        f'['
-        f'  {{"question": "Текст вопроса", "options": ["Вариант A", "Вариант B", "Вариант C", "Вариант D"], "correct_idx": 0, "comment": "Короткий факт или пояснение к ответу"}}'
+        f"Сгенерируй ровно 10 вопросов для живой групповой викторины в чате. "
+        f"Используй микс из этих сфер: {selected_topics}.\n\n"
+        f"ЖЕСТКАЯ ГРАДАЦИЯ СЛОЖНОСТИ (критически важно соблюсти контраст!):\n"
+        f"• Вопросы 1–3 (УРОВЕНЬ: ЭЛЕМЕНТАРНЫЙ РАЗГОН): Очень лёгкие, бытовые или поп-культурные вопросы, "
+        f"на которые 95% обычных взрослых людей ответят за 3 секунды без раздумий. "
+        f"(Примеры уровня: известные фильмы, популярная еда, столицы, очевидные поговорки, базовые явления природы. Никаких дат и узких терминов!).\n"
+        f"• Вопросы 4–7 (УРОВЕНЬ: СРЕДНИЙ): Интересные вопросы на кругозор и смекалку, где нужно немного подумать, "
+        f"но ответ известен образованному человеку.\n"
+        f"• Вопросы 8–10 (УРОВЕНЬ: ХАРДКОР / ЧГК): Редкие, парадоксальные и неочевидные факты для настоящих эрудитов.\n\n"
+        f"ПРАВИЛА ПРОВЕРКИ:\n"
+        f"1. Каждый вопрос должен иметь ровно 4 варианта ответа и только ОДИН 100% достоверный правильный ответ (correct_idx от 0 до 3).\n"
+        f"2. Не делай правильный ответ самым длинным или выделяющимся по стилю.\n"
+        f"{avoid_block}\n"
+        f"Ответь СТРОГО валидным JSON-списком из 10 объектов без markdown-блоков:\n"
+        f'[\n'
+        f'  {{"question": "Текст вопроса", "options": ["Вариант 1", "Вариант 2", "Вариант 3", "Вариант 4"], "correct_idx": 0, "comment": "Короткий интересный факт к ответу"}}\n'
         f']'
     )
+
     raw_text = ""
     try:
         response = client.models.generate_content(
             model="gemini-3.8-flash",
             contents=prompt,
             config=types.GenerateContentConfig(
-                response_mime_type="application/json"
+                response_mime_type="application/json",
+                temperature=1.1  # Повышаем креативность, чтобы избегать шаблонов
             )
         )
         raw_text = (response.text or "").strip()
@@ -230,16 +284,25 @@ def generate_quiz_questions(theme="общая эрудиция, искусств
                 and isinstance(options, list) and len(options) >= 2
                 and isinstance(correct_idx, int) and 0 <= correct_idx < len(options)
             ):
+                clean_options = [str(opt).strip() for opt in options]
+                correct_answer_text = clean_options[correct_idx]
+                
+                # Перемешиваем варианты ответа, чтобы правильный не был всегда под одной буквой
+                random.shuffle(clean_options)
+                new_correct_idx = clean_options.index(correct_answer_text)
+
                 valid_questions.append({
                     "question": question_text.strip(),
-                    "options": [str(opt) for opt in options],
-                    "correct_idx": correct_idx,
+                    "options": clean_options,
+                    "correct_idx": new_correct_idx,
                     "comment": str(item.get("comment", "")).strip()
                 })
             else:
                 print(f"Пропущен некорректный вопрос #{idx}: {item}")
 
-        if not valid_questions:
+        if valid_questions:
+            save_used_questions(valid_questions)
+        else:
             print(f"Ошибка генерации вопросов: ни один вопрос не прошёл валидацию. Сырой ответ: {raw_text[:500]}")
         return valid_questions
 
