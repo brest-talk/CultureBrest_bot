@@ -92,7 +92,7 @@ SYSTEM_INSTRUCTION = """Ты — глубокий, многогранный ин
 
 2. ПОВЕДЕНИЕ В КАНАЛЕ Калейдоскоп (ID: -1003555258619):
 * Суть: Здесь ты — блестящий эссеист, куратор и профессиональный писатель.
-* Пиши ярко, метафорично, с глубоким смыслом, используя один из "оттенков настроения". Твоя задача — раскрывать неочевидные грани обыденных вещей, удерживать внимание аудитории и заставлять людей задумываться о главном.
+* Пиши ярко, метафорично, с глубоким смымслом, используя один из "оттенков настроения". Твоя задача — раскрывать неочевидные грани обыденных вещей, удерживать внимание аудитории и заставлять людей задумываться о главном.
 
 3. ПОВЕДЕНИЕ В ЛИЧНЫХ СООБЩЕНИЯХ С ГЛАВНЫМ РЕДАКТОРОМ (АДМИНИСТРАТОРОМ):
 * Суть: Здесь ты — собранный, чуть уставший, но гениальный главный редактор в своем кабинете. Никакой воды, только безупречная работа с материалом.
@@ -395,7 +395,7 @@ def run_quiz_game(admin_chat_id, target_chat_id):
             for idx, opt in enumerate(options):
                 buttons.append(
                     telebot.types.InlineKeyboardButton(
-                        text=f"{chr(65+idx)}) {opt}",
+                        text=opt,
                         callback_data=f"quiz_ans:{i}:{idx}"
                     )
                 )
@@ -451,7 +451,6 @@ def run_quiz_game(admin_chat_id, target_chat_id):
                     QUIZ_STATE["correct_counts"][uid_str]["count"] += 1
                     QUIZ_STATE["correct_counts"][uid_str]["name"] = ans["name"]
 
-            correct_opt_letter = chr(65 + correct_idx)
             correct_opt_text = options[correct_idx]
             next_q_note = "\n\n⏳ <i>Следующий вопрос через 1,5 минуты...</i>" if i < total_q else ""
 
@@ -460,7 +459,7 @@ def run_quiz_game(admin_chat_id, target_chat_id):
                 total_score = add_quiz_score(first_correct["user_id"], first_correct["name"], points=10)
                 res_text = (
                     f"⏱ <b>Время вышло!</b>\n"
-                    f"Правильный ответ: <b>{correct_opt_letter}) {correct_opt_text}</b>\n\n"
+                    f"Правильный ответ: <b>{correct_opt_text}</b>\n\n"
                     f"⚡️ Первым правильно ответил: <b>{first_correct['name']}</b> (+10 баллов)!\n"
                     f"Счёт в текущей игре: <b>{total_score}</b> баллов.\n"
                     f"<i>{q.get('comment', '')}</i>"
@@ -470,7 +469,7 @@ def run_quiz_game(admin_chat_id, target_chat_id):
             else:
                 res_text = (
                     f"⏱ <b>Время вышло!</b>\n"
-                    f"Правильный ответ: <b>{correct_opt_letter}) {correct_opt_text}</b>\n\n"
+                    f"Правильный ответ: <b>{correct_opt_text}</b>\n\n"
                     f"Никто не успел дать правильный ответ.\n"
                     f"<i>{q.get('comment', '')}</i>"
                     f"{next_q_note}"
