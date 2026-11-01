@@ -828,6 +828,7 @@ def webhook():
             uid = cq.from_user.id
             uname = cq.from_user.first_name or "Участник"
 
+            chosen_text = ""
             with quiz_lock:
                 if not QUIZ_STATE["is_running"] or q_num != QUIZ_STATE["current_question"]:
                     try:
@@ -835,6 +836,11 @@ def webhook():
                     except Exception:
                         pass
                     return '!', 200
+
+                if 0 <= q_num - 1 < len(QUIZ_STATE["questions"]):
+                    q_opts = QUIZ_STATE["questions"][q_num - 1].get("options", [])
+                    if 0 <= chosen_opt < len(q_opts):
+                        chosen_text = q_opts[chosen_opt]
 
                 try:
                     if uid in QUIZ_STATE["answers"]:
@@ -846,7 +852,8 @@ def webhook():
                             "option": chosen_opt,
                             "time": time.time()
                         }
-                        bot.answer_callback_query(cq.id, "Ответ принят!", show_alert=False)
+                        alert_msg = f"✅ Ваш выбор: {chosen_text}" if chosen_text else "✅ Ответ принят!"
+                        bot.answer_callback_query(cq.id, alert_msg, show_alert=False)
                 except Exception as e:
                     print(f"Ошибка ответа на callback_query: {e}")
             return '!', 200
@@ -938,7 +945,7 @@ def webhook():
                         prompt = (
                             f"Транскрибируй этот материал и СРАЗУ оформи его как готовый пост. "
                             f"КАТЕГОРИЧЕСКИ ЗАПРЕЩАЕТСЯ выдумывать темы, которых нет в медиафайле. Сохрани оригинальный смысл.\n\n"
-                            f"ИНСТРУКЦИЯ ПО ОФОРМЛЕНИЮ (используй HTML-теги для Telegram):\n"
+                            f"ИНСТРУКЦИЯ ПО ОФОРМЛЕЮ (используй HTML-теги для Telegram):\n"
                             f"0. ВАЖНО: Удали абсолютно все символы звездочек (*) из итогового текста. Не используй Markdown-разметку (**текст**), применяй только HTML.\n"
                             f"1. <i>Короткое, но цепляющее вступление курсивом (креативный лид или тизер, который звучит как интригующий подзаголовок и задает тон).</i>\n"
                             f"2. <b>Жирный заголовок</b> (Максимально короткий — 1-3 слова. Сделай его хлестким: используй сарказм, иронию, парадокс или тонкую насмешку над сутью текста).\n"
