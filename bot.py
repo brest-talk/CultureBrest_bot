@@ -5,7 +5,7 @@ import random
 import re
 import time
 from datetime import datetime, timezone, timedelta
-from threading import Thread, Lock, RLock
+from threading import Thread, Lock, RLock, Timer
 from flask import Flask, request
 from google import genai
 from google.genai import types
@@ -107,19 +107,27 @@ def get_current_date_ru():
     now = datetime.now(tz)
     return f"{now.day} {months[now.month - 1]} {now.year} г."
 
-def delete_later(chat_id, message_id, delay=3600):
-    time.sleep(delay)
+def atomic_save_json(filepath, data):
+    tmp_path = filepath + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, filepath)
+
+def delete_later(chat_id, message_id):
     try:
         bot.delete_message(chat_id, message_id)
     except Exception:
         pass
 
-def unpin_and_delete_later(chat_id, message_id, delay=3600):
-    time.sleep(delay)
+def unpin_and_delete_later(chat_id, message_id):
     try:
         bot.unpin_chat_message(chat_id, message_id)
     except Exception as e:
         print(f"Ошибка при откреплении сообщения: {e}")
+    try:
+        bot.delete_message(chat_id, message_id)
+    except Exception:
+        pass
 
 def load_history(chat_id):
     filename = os.path.join(DATA_DIR, f"history_{chat_id}.json")
@@ -148,12 +156,13 @@ def load_history(chat_id):
 def save_history(chat_id, history):
     filename = os.path.join(DATA_DIR, f"history_{chat_id}.json")
     trimmed = history[-MAX_HISTORY_MESSAGES:]
-    while trimmed and trimmed[0].get("role") != "user":
+    def get_role(item):
+        return item.get("role") if isinstance(item, dict) else getattr(item, "role", None)
+    while trimmed and get_role(trimmed[0]) != "user":
         trimmed.pop(0)
     with history_lock:
         try:
-            with open(filename, "w", encoding="utf-8") as f:
-                json.dump(trimmed, f, ensure_ascii=False, indent=2)
+            atomic_save_json(filename, trimmed)
         except Exception as e:
             print(f"Ошибка сохранения истории {filename}: {e}")
 
@@ -174,8 +183,7 @@ def load_quiz_scores():
 def save_quiz_scores(scores):
     with quiz_lock:
         try:
-            with open(QUIZ_STATE["scores_file"], "w", encoding="utf-8") as f:
-                json.dump(scores, f, ensure_ascii=False, indent=2)
+            atomic_save_json(QUIZ_STATE["scores_file"], scores)
         except Exception as e:
             print(f"Ошибка сохранения очков квиза: {e}")
 
@@ -214,8 +222,7 @@ def save_used_questions(new_questions):
                 used.append(q_text)
         used = used[-100:]
         try:
-            with open(USED_QUESTIONS_FILE, "w", encoding="utf-8") as f:
-                json.dump(used, f, ensure_ascii=False, indent=2)
+            atomic_save_json(USED_QUESTIONS_FILE, used)
         except Exception as e:
             print(f"Ошибка сохранения истории вопросов: {e}")
 
@@ -395,13 +402,14 @@ def run_quiz_game(admin_chat_id, target_chat_id):
             markup.add(*buttons)
 
             q_header = (
-                f"🔥 <b>СУПЕР-ВОПРОС №{i} из {total_q}</b> (время: 30 сек):"
+                f"🔥 <b>СУПЕР-ВОПРОС {i} из {total_q}</b> • ⏱ 30 сек"
                 if i == total_q
-                else f"<b>Вопрос №{i} из {total_q}</b> (время: 30 сек):"
+                else f"<i>Вопрос {i} из {total_q} • ⏱ 30 сек</i>"
             )
             msg_text = (
-                f"{q_header}\n\n"
-                f"<b>{q.get('question', 'Вопрос')}</b>"
+                f"{q_header}\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"<blockquote><b>{q.get('question', 'Вопрос')}</b></blockquote>"
             )
             try:
                 q_msg = bot.send_message(target_chat_id, msg_text, reply_markup=markup, parse_mode="HTML")
@@ -557,7 +565,32 @@ def run_quiz_game(admin_chat_id, target_chat_id):
             except Exception as e:
                 print(f"Ошибка при закреплении итогового сообщения: {e}")
 
-            Thread(target=unpin_and_delete_later, args=(target_chat_id, leaderboard_msg.message_id, 3600)).start()
+            try:
+                host_prompt = (
+                    f"Только что в чате завершилась интеллектуальная викторина. "
+                    f"Вот официальные итоги:\n{final_msg_text}\n\n"
+                    f"Отреагируй на финал этой битвы умов в своем фирменном стиле — как эстет, тонкий философ и редактор журнала. "
+                    f"Выскажись свободно, живо и без шаблонов (отметь накал страстей, взяли ли билеты в кино, или просто брось меткое наблюдение о человеческом азарте). "
+                    f"КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНЫ любые эмодзи и смайлики. Только чистый текст без кавычек."
+                )
+                host_resp = client.models.generate_content(
+                    model="gemini-3.8-flash",
+                    contents=host_prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction=SYSTEM_INSTRUCTION
+                    )
+                )
+                host_words = (host_resp.text or "").strip()
+                if host_words:
+                    bot.send_message(
+                        target_chat_id,
+                        host_words,
+                        reply_to_message_id=leaderboard_msg.message_id
+                    )
+            except Exception as e:
+                print(f"Ошибка генерации слова ведущего: {e}")
+
+            Timer(3600, unpin_and_delete_later, args=[target_chat_id, leaderboard_msg.message_id]).start()
     except Exception as e:
         print(f"Ошибка во время проведения викторины: {e}")
     finally:
@@ -670,7 +703,22 @@ def extract_media_part(message):
 
 def send_long_message(chat_id, message, text, chat_type):
     max_len = 4096
-    chunks = [text[i:i + max_len] for i in range(0, len(text), max_len)] or [text]
+    if len(text) <= max_len:
+        chunks = [text]
+    else:
+        chunks = []
+        remaining = text
+        while len(remaining) > max_len:
+            split_idx = remaining.rfind("\n\n", 0, max_len)
+            if split_idx == -1:
+                split_idx = remaining.rfind("\n", 0, max_len)
+            if split_idx <= 0:
+                split_idx = max_len
+            chunks.append(remaining[:split_idx].strip())
+            remaining = remaining[split_idx:].strip()
+        if remaining:
+            chunks.append(remaining)
+
     for idx, chunk in enumerate(chunks):
         try:
             if chat_type == 'channel' or idx > 0:
@@ -737,7 +785,7 @@ def process_ai_response(chat_id, message_id, message, contents, chat_type):
                 except Exception as e:
                     print(f"Ошибка пересылки конкурсного фото: {e}")
             else:
-                Thread(target=delete_later, args=(chat_id, message.message_id, 120)).start()
+                Timer(120, delete_later, args=[chat_id, message.message_id]).start()
 
     new_history = []
     try:
@@ -1022,4 +1070,4 @@ if __name__ == "__main__":
         bot.remove_webhook()
         time.sleep(0.5)
         bot.set_webhook(url=f"{render_url}/{TOKEN}")
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)), threaded=True)
