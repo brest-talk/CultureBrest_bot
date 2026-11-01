@@ -36,6 +36,7 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 app = Flask(__name__)
 history_lock = Lock()
 quiz_lock = RLock()
+lobby_lock = Lock()
 
 _BOT_INFO = None
 
@@ -57,6 +58,34 @@ QUIZ_STATE = {
     "correct_counts": {},
     "scores_file": os.path.join(DATA_DIR, "quiz_scores.json")
 }
+
+QUIZ_LOBBY = {
+    "is_collecting": False,
+    "chat_id": None,
+    "msg_id": None,
+    "players": set(),       # множество user_id участников
+    "cancel_timer": None    # объект threading.Timer на 20 минут
+}
+
+def on_lobby_timeout():
+    with lobby_lock:
+        if QUIZ_LOBBY["is_collecting"]:
+            QUIZ_LOBBY["is_collecting"] = False
+            chat_id = QUIZ_LOBBY["chat_id"]
+            msg_id = QUIZ_LOBBY["msg_id"]
+            players_count = len(QUIZ_LOBBY["players"])
+            QUIZ_LOBBY["cancel_timer"] = None
+            try:
+                bot.edit_message_reply_markup(chat_id, msg_id, reply_markup=None)
+            except Exception:
+                pass
+            try:
+                bot.send_message(
+                    chat_id,
+                    f"⏳ Время вышло, кворум не набран (собралось {players_count} из 4). Расходимся до следующей субботы!"
+                )
+            except Exception as e:
+                print(f"Ошибка отправки сообщения об отмене сбора: {e}")
 
 def get_star_prize_by_points(points):
     if points >= 100:
@@ -92,7 +121,7 @@ SYSTEM_INSTRUCTION = """Ты — глубокий, многогранный ин
 
 2. ПОВЕДЕНИЕ В КАНАЛЕ Калейдоскоп (ID: -1003555258619):
 * Суть: Здесь ты — блестящий эссеист, куратор и профессиональный писатель.
-* Пиши ярко, метафорично, с глубоким смымслом, используя один из "оттенков настроения". Твоя задача — раскрывать неочевидные грани обыденных вещей, удерживать внимание аудитории и заставлять людей задумываться о главном.
+* Пиши ярко, метафорично, с глубоким смыслом, используя один из "оттенков настроения". Твоя задача — раскрывать неочевидные грани обыденных вещей, удерживать внимание аудитории и заставлять людей задумываться о главном.
 
 3. ПОВЕДЕНИЕ В ЛИЧНЫХ СООБЩЕНИЯХ С ГЛАВНЫМ РЕДАКТОРОМ (АДМИНИСТРАТОРОМ):
 * Суть: Здесь ты — собранный, чуть уставший, но гениальный главный редактор в своем кабинете. Никакой воды, только безупречная работа с материалом.
@@ -815,6 +844,71 @@ def webhook():
     if update.callback_query:
         cq = update.callback_query
         data = cq.data or ""
+        if data == "lobby_join":
+            with lobby_lock:
+                if not QUIZ_LOBBY["is_collecting"]:
+                    try:
+                        bot.answer_callback_query(cq.id, "Сбор игроков уже завершён!", show_alert=False)
+                    except Exception:
+                        pass
+                    return '!', 200
+
+                if cq.from_user.id in QUIZ_LOBBY["players"]:
+                    QUIZ_LOBBY["players"].remove(cq.from_user.id)
+                    try:
+                        bot.answer_callback_query(cq.id, "Вы покинули сбор игроков.", show_alert=False)
+                    except Exception:
+                        pass
+                else:
+                    QUIZ_LOBBY["players"].add(cq.from_user.id)
+                    try:
+                        bot.answer_callback_query(cq.id, "Вы в игре!", show_alert=False)
+                    except Exception:
+                        pass
+
+                count = len(QUIZ_LOBBY["players"])
+                target_count = 4
+
+                if count < target_count:
+                    new_markup = telebot.types.InlineKeyboardMarkup()
+                    new_markup.add(telebot.types.InlineKeyboardButton(
+                        text=f"🙋‍♂️ Я в деле ({count} из {target_count})",
+                        callback_data="lobby_join"
+                    ))
+                    try:
+                        bot.edit_message_reply_markup(
+                            QUIZ_LOBBY["chat_id"],
+                            QUIZ_LOBBY["msg_id"],
+                            reply_markup=new_markup
+                        )
+                    except Exception:
+                        pass
+                elif count >= target_count:
+                    QUIZ_LOBBY["is_collecting"] = False
+                    if QUIZ_LOBBY["cancel_timer"]:
+                        QUIZ_LOBBY["cancel_timer"].cancel()
+                        QUIZ_LOBBY["cancel_timer"] = None
+
+                    try:
+                        bot.edit_message_text(
+                            chat_id=QUIZ_LOBBY["chat_id"],
+                            message_id=QUIZ_LOBBY["msg_id"],
+                            text=f"🔥 <b>Кворум собран ({count} из {target_count})!</b> Все места заняты. Викторина начинается...",
+                            parse_mode="HTML"
+                        )
+                    except Exception:
+                        pass
+
+                    with quiz_lock:
+                        QUIZ_STATE["is_running"] = True
+                        QUIZ_STATE["current_question"] = 0
+                        QUIZ_STATE["answers"] = {}
+                        QUIZ_STATE["correct_counts"] = {}
+
+                    lobby_target = QUIZ_LOBBY["chat_id"]
+                    Thread(target=run_quiz_game, args=(lobby_target, lobby_target)).start()
+            return '!', 200
+
         if data.startswith("quiz_ans:"):
             parts = data.split(":")
             if len(parts) != 3:
@@ -872,9 +966,74 @@ def webhook():
                 bot.delete_message(chat_id, message.message_id)
             except Exception:
                 pass
+            with lobby_lock:
+                if QUIZ_LOBBY["is_collecting"]:
+                    QUIZ_LOBBY["is_collecting"] = False
+                    if QUIZ_LOBBY["cancel_timer"]:
+                        QUIZ_LOBBY["cancel_timer"].cancel()
+                        QUIZ_LOBBY["cancel_timer"] = None
+                    try:
+                        bot.edit_message_text(
+                            chat_id=QUIZ_LOBBY["chat_id"],
+                            message_id=QUIZ_LOBBY["msg_id"],
+                            text="🛑 <b>Сбор участников отменён администратором.</b>",
+                            parse_mode="HTML"
+                        )
+                    except Exception:
+                        pass
             with quiz_lock:
                 QUIZ_STATE["is_running"] = False
             bot.send_message(chat_id, "🛑 Викторина принудительно остановлена.")
+            return '!', 200
+
+        if user_id == ADMIN_ID and cmd_clean == '/time_quiz':
+            try:
+                bot.delete_message(chat_id, message.message_id)
+            except Exception:
+                pass
+            with quiz_lock:
+                is_quiz_running = QUIZ_STATE["is_running"]
+            with lobby_lock:
+                if is_quiz_running or QUIZ_LOBBY["is_collecting"]:
+                    bot.send_message(chat_id, "Викторина или сбор участников уже запущены.")
+                    return '!', 200
+
+                target_chat = BREST_TALK_ID if chat_type == 'private' else chat_id
+                markup = telebot.types.InlineKeyboardMarkup()
+                markup.add(telebot.types.InlineKeyboardButton(
+                    text="🙋‍♂️ Я в деле (0 из 4)",
+                    callback_data="lobby_join"
+                ))
+
+                lobby_text = (
+                    "🎲 <b>Объявляется сбор участников на интеллектуальную викторину!</b>\n\n"
+                    "Для старта игры нужен кворум: минимум <b>4 участника</b>.\n"
+                    "Жмите кнопку ниже, чтобы занять место за столом. На сбор — <b>20 минут</b>."
+                )
+
+                try:
+                    sent_msg = bot.send_message(
+                        target_chat,
+                        lobby_text,
+                        reply_markup=markup,
+                        parse_mode="HTML"
+                    )
+                except Exception as e:
+                    print(f"Ошибка отправки сообщения сбора лобби: {e}")
+                    return '!', 200
+
+                QUIZ_LOBBY["is_collecting"] = True
+                QUIZ_LOBBY["chat_id"] = target_chat
+                QUIZ_LOBBY["msg_id"] = sent_msg.message_id
+                QUIZ_LOBBY["players"] = set()
+                if QUIZ_LOBBY["cancel_timer"]:
+                    QUIZ_LOBBY["cancel_timer"].cancel()
+                timer = Timer(1200, on_lobby_timeout)
+                QUIZ_LOBBY["cancel_timer"] = timer
+                timer.start()
+
+            if chat_type == 'private':
+                bot.send_message(chat_id, "🎲 Сбор на викторину запущен в целевом чате!")
             return '!', 200
 
         if cmd_clean in ['/quiz_top', '!топквиз']:
@@ -945,7 +1104,7 @@ def webhook():
                         prompt = (
                             f"Транскрибируй этот материал и СРАЗУ оформи его как готовый пост. "
                             f"КАТЕГОРИЧЕСКИ ЗАПРЕЩАЕТСЯ выдумывать темы, которых нет в медиафайле. Сохрани оригинальный смысл.\n\n"
-                            f"ИНСТРУКЦИЯ ПО ОФОРМЛЕЮ (используй HTML-теги для Telegram):\n"
+                            f"ИНСТРУКЦИЯ ПО ОФОРМЛЕНИЮ (используй HTML-теги для Telegram):\n"
                             f"0. ВАЖНО: Удали абсолютно все символы звездочек (*) из итогового текста. Не используй Markdown-разметку (**текст**), применяй только HTML.\n"
                             f"1. <i>Короткое, но цепляющее вступление курсивом (креативный лид или тизер, который звучит как интригующий подзаголовок и задает тон).</i>\n"
                             f"2. <b>Жирный заголовок</b> (Максимально короткий — 1-3 слова. Сделай его хлестким: используй сарказм, иронию, парадокс или тонкую насмешку над сутью текста).\n"
