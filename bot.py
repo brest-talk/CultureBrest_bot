@@ -37,6 +37,9 @@ app = Flask(__name__)
 history_lock = Lock()
 quiz_lock = RLock()
 lobby_lock = Lock()
+media_group_lock = Lock()
+
+MEDIA_GROUPS = {}  # {media_group_id: {"photos": [parts], "caption": str, "chat_id": int, "message": msg, "timer": Timer}}
 
 _BOT_INFO = None
 
@@ -135,6 +138,36 @@ def get_current_date_ru():
     tz = timezone(timedelta(hours=3))
     now = datetime.now(tz)
     return f"{now.day} {months[now.month - 1]} {now.year} г."
+
+def build_mafia_chronicle_prompt(user_comment=""):
+    date_str = get_current_date_ru()
+    comment_block = f"\nИСХОДНЫЕ МАТЕРИАЛЫ / КОММЕНТАРИЙ РЕДАКТОРА:\n«{user_comment}»\n" if user_comment else ""
+    return (
+        f"Ты — утонченный сатирик, драматург и главный эссеист брестского журнала «Калейдоскоп». "
+        f"Перед тобой скриншоты или протокол ночной психологической баталии «Мафия» в чате Brest_TALK. "
+        f"Твоя задача — превратить эту сухую партию в захватывающий литературно-сатирический этюд.\n\n"
+        f"{comment_block}\n"
+        f"ЖЕСТКИЙ ЛИМИТ ОБЪЕМА:\n"
+        f"Весь итоговый пост (от первого слова лида до подписи даты) должен составлять СТРОГО ДО 1100 СИМВОЛОВ С ПРОБЕЛАМИ. "
+        f"Текст должен читаться ровно за 40–50 секунд, быть максимально плотным, сочным, без воды и длинных предисловий, идеально помещаясь в один экран телефона.\n\n"
+        f"ПРАВИЛА ДРАМАТУРГИИ И СТИЛЯ:\n"
+        f"1. РЕЗКИЕ СЮЖЕТНЫЕ ПОВОРОТЫ: Выстраивай рассказ как напряженную микро-пьесу. Завязка (обманчивый покой, маски невинности) -> Развитие интриги -> Внезапный слом (акцентируй внимание на минутах и секундах партии: «Ровно в 01:14 хрупкий мир рухнул...», «Когда до рассвета оставались считанные мгновения, один неосторожный взгляд перечеркнул всё») -> Роковая ошибка или триумф блефа.\n"
+        f"2. ДЕЙСТВУЮЩИЕ ЛИЦА: Обязательно вплетай реальные имена игроков со скриншотов или протокола. С тонкой сатирой подмечай психологию блефа и подозрений: кто клялся в честности, кто устроил излишнюю драму, чье алиби рассыпалось, и кто в итоге хладнокровно переиграл стол.\n"
+        f"3. ОРИГИНАЛЬНОСТЬ И ВАРЬИРОВАНИЕ ЗАГОЛОВКОВ: Партии идут каждый вечер, поэтому штампы ЗАПРЕЩЕНЫ. Никаких «Итогов игры» или скучных отчетов! Заголовок должен быть метафоричным, хлестким (1–3 слова) и отражать суть конкретной драмы (например: «Анатомия блефа», «Фарс на Советской», «Реквием по фонарщику», «Искусство предавать вовремя», «Театр теней»).\n"
+        f"4. ВРЕМЕННЫЕ МАРКЕРЫ: Фразы «вчерашняя игра», «минувшей ночью» или «под покровом сумерек» используй редко, ненавязчиво и разнообразно, чтобы тексты не сливались в один шаблон.\n"
+        f"5. ЭМОДЗИ (ЯВНОЕ ИСКЛЮЧЕНИЕ ИЗ СИСТЕМНОГО ЗАПРЕТА): В этой рубрике РАЗРЕШЕНО и НУЖНО использовать ровно 2–3 выразительных атмосферных эмодзи (например: 🎭, 🍷, 🕯️, 🎲), органично вплетая их в заголовок или текст.\n"
+        f"6. МУДРОСТЬ НА ПОЛЯХ: В финале дай философский срез человеческой натуры — ироничный или глубокий афоризм о людях и масках (1 предложение).\n\n"
+        f"СТРОГАЯ СТРУКТУРА ВЕРСТКИ (ТОЛЬКО HTML, НИКАКИХ ЗВЕЗДОЧЕК *):\n"
+        f"<i>Короткий интригующий лид курсивом (1 предложение).</i>\n"
+        f"<b>ОРИГИНАЛЬНЫЙ ЗАГОЛОВОК (1-3 слова)</b>\n\n"
+        f"<blockquote expandable>\n"
+        f"Основной текст хроники: завязка, накал страстей с именами, кульминация с минутами и финал. Единым блоком без разбивки.\n"
+        f"</blockquote>\n\n"
+        f"<b>Мысли на полях:</b>\n"
+        f"<blockquote expandable><i>Ироничный или глубокий афоризм о людях и масках (1 предложение).</i></blockquote>\n\n"
+        f"Kaleidoscope | Brest 🎨\n"
+        f"{date_str}"
+    )
 
 def atomic_save_json(filepath, data):
     tmp_path = filepath + ".tmp"
@@ -258,7 +291,6 @@ def save_used_questions(new_questions):
 def generate_quiz_questions():
     used_questions = load_used_questions()
     
-    # Случайный набор тем для разнообразия каждой игры
     all_topics = [
         "кино и популярные сериалы", "география и страны", "кулинария и напитки",
         "музыка и хиты", "животный мир и природа", "космос и изобретения",
@@ -306,7 +338,7 @@ def generate_quiz_questions():
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
-                temperature=1.1  # Повышаем креативность, чтобы избегать шаблонов
+                temperature=1.1
             )
         )
         raw_text = (response.text or "").strip()
@@ -342,7 +374,6 @@ def generate_quiz_questions():
                 clean_options = [str(opt).strip() for opt in options]
                 correct_answer_text = clean_options[correct_idx]
                 
-                # Перемешиваем варианты ответа, чтобы правильный не был всегда под одной буквой
                 random.shuffle(clean_options)
                 new_correct_idx = clean_options.index(correct_answer_text)
 
@@ -468,7 +499,6 @@ def run_quiz_game(admin_chat_id, target_chat_id):
             ]
             correct_answers.sort(key=lambda x: x["time"])
 
-            # Фиксируем правильные ответы для отслеживания 11 из 11 подряд без ошибок
             with quiz_lock:
                 for ans in correct_answers:
                     uid_str = str(ans["user_id"])
@@ -523,7 +553,6 @@ def run_quiz_game(admin_chat_id, target_chat_id):
                 key=lambda x: (-x.get("points", 0), x.get("last_time", float("inf")))
             )
 
-            # Проверяем участников с идеальным результатом (все 11 вопросов без единой ошибки)
             perfect_target = total_q if total_q > 0 else 11
             perfect_players = [
                 info["name"]
@@ -729,7 +758,56 @@ def extract_media_part(message):
         print(f"Ошибка скачивания медиафайла: {e}")
         return None
 
+def flush_media_group(media_group_id):
+    with media_group_lock:
+        group_data = MEDIA_GROUPS.pop(media_group_id, None)
+
+    if not group_data:
+        return
+
+    photos = group_data.get("photos", [])
+    caption = group_data.get("caption", "")
+    chat_id = group_data.get("chat_id")
+    message = group_data.get("message")
+
+    if not photos or not chat_id or not message:
+        return
+
+    try:
+        bot.send_chat_action(chat_id, 'typing')
+    except Exception:
+        pass
+
+    caption_lower = caption.lower()
+    is_mafia_cmd = ("#мафия" in caption_lower) or ("мафия" in caption_lower)
+    is_kaleidoscope_cmd = any(word in caption_lower for word in ["калейдоскоп", "оформи"])
+
+    if is_mafia_cmd:
+        prompt = build_mafia_chronicle_prompt(caption)
+    elif is_kaleidoscope_cmd:
+        date_str = get_current_date_ru()
+        prompt = (
+            f"Транскрибируй этот материал и СРАЗУ оформи его как готовый пост. "
+            f"КАТЕГОРИЧЕСКИ ЗАПРЕЩАЕТСЯ выдумывать темы, которых нет в медиафайле. Сохрани оригинальный смысл.\n\n"
+            f"ИНСТРУКЦИЯ ПО ОФОРМЛЕНИЮ (используй HTML-теги для Telegram):\n"
+            f"0. ВАЖНО: Удали абсолютно все символы звездочек (*) из итогового текста. Не используй Markdown-разметку (**текст**), применяй только HTML.\n"
+            f"1. <i>Короткое, но цепляющее вступление курсивом (креативный лид или тизер, который звучит как интригующий подзаголовок и задает тон).</i>\n"
+            f"2. <b>Жирный заголовок</b> (Максимально короткий — 1-3 слова. Сделай его хлестким: используй сарказм, иронию, парадокс или тонкую насмешку над сутью текста).\n"
+            f"3. Весь основной текст помести строго в ОДНУ раскрывающуюся цитату: <blockquote expandable>весь основной текст одним блоком</blockquote>. Не дроби текст на несколько цитат!\n"
+            f"4. Секция: <b>Мысли на полях:</b>\n"
+            f"5. Текст мыслей оберни во ВТОРУЮ цитату и курсив: <blockquote expandable><i>короткий вывод по тексту</i></blockquote>\n"
+            f"6. Подпись строго в две строки:\nKaleidoscope | Brest 🎨\n{date_str}\n\n"
+            f"Дополнительный комментарий: {caption}"
+        )
+    else:
+        comment_note = f" Дополнительный комментарий: {caption}" if caption else ""
+        prompt = f"Изучи этот материал. Транскрибируй его смысловое наполнение и перепиши от своего лица.{comment_note}"
+
+    contents = [prompt] + photos
+    process_ai_response(chat_id, message.message_id, message, contents, 'private')
+
 def send_long_message(chat_id, message, text, chat_type):
+    text = text.replace("*", "")
     max_len = 4096
     if len(text) <= max_len:
         chunks = [text]
@@ -755,11 +833,12 @@ def send_long_message(chat_id, message, text, chat_type):
                 bot.reply_to(message, chunk, parse_mode="HTML")
         except Exception as e:
             print(f"Ошибка форматирования HTML, отправка без разметки: {e}")
+            plain_chunk = re.sub(r"<[^>]+>", "", chunk)
             try:
                 if chat_type == 'channel' or idx > 0:
-                    bot.send_message(chat_id, chunk)
+                    bot.send_message(chat_id, plain_chunk)
                 else:
-                    bot.reply_to(message, chunk)
+                    bot.reply_to(message, plain_chunk)
             except Exception as inner_e:
                 print(f"Ошибка отправки сообщения: {inner_e}")
 
@@ -776,7 +855,7 @@ def process_ai_response(chat_id, message_id, message, contents, chat_type):
         )
         
         response = chat.send_message(contents)
-        gemini_response = (response.text or "").strip()
+        gemini_response = (response.text or "").strip().replace("*", "")
         if not gemini_response:
             gemini_response = "Не удалось сформировать ответ."
     except Exception as e:
@@ -1082,6 +1161,30 @@ def webhook():
                     bot.send_message(chat_id, "Приветствую, шеф.")
                     return '!', 200
 
+                # Буферизация альбомов фотографий (media_group_id) от ADMIN_ID
+                if message.photo and getattr(message, 'media_group_id', None):
+                    mg_id = str(message.media_group_id)
+                    photo_part = extract_media_part(message)
+                    if photo_part:
+                        with media_group_lock:
+                            if mg_id not in MEDIA_GROUPS:
+                                MEDIA_GROUPS[mg_id] = {
+                                    "photos": [],
+                                    "caption": "",
+                                    "chat_id": chat_id,
+                                    "message": message,
+                                    "timer": None
+                                }
+                            MEDIA_GROUPS[mg_id]["photos"].append(photo_part)
+                            if message.caption:
+                                MEDIA_GROUPS[mg_id]["caption"] = message.caption
+                            if MEDIA_GROUPS[mg_id]["timer"]:
+                                MEDIA_GROUPS[mg_id]["timer"].cancel()
+                            timer = Timer(5.0, flush_media_group, args=[mg_id])
+                            MEDIA_GROUPS[mg_id]["timer"] = timer
+                            timer.start()
+                    return '!', 200
+
                 try:
                     bot.send_chat_action(chat_id, 'typing')
                 except Exception:
@@ -1091,15 +1194,30 @@ def webhook():
                 if not media_part and message.reply_to_message:
                     media_part = extract_media_part(message.reply_to_message)
 
-                contents = []
-                is_kaleidoscope_cmd = any(word in user_text.lower() for word in ["калейдоскоп", "оформи"])
-
                 reply_text = ""
                 if message.reply_to_message:
                     reply_text = message.reply_to_message.text or message.reply_to_message.caption or ""
 
+                contents = []
+                user_text_lower = user_text.lower()
+                reply_text_lower = reply_text.lower()
+
+                is_mafia_cmd = (
+                    ("#мафия" in user_text_lower)
+                    or ("мафия" in user_text_lower)
+                    or ("#мафия" in reply_text_lower)
+                    or ("мафия" in reply_text_lower)
+                )
+                is_kaleidoscope_cmd = any(
+                    word in user_text_lower
+                    for word in ["калейдоскоп", "оформи"]
+                )
+
                 if media_part:
-                    if is_kaleidoscope_cmd:
+                    if is_mafia_cmd:
+                        combined_comment = f"{user_text}\n{reply_text}".strip()
+                        prompt = build_mafia_chronicle_prompt(combined_comment)
+                    elif is_kaleidoscope_cmd:
                         date_str = get_current_date_ru()
                         prompt = (
                             f"Транскрибируй этот материал и СРАЗУ оформи его как готовый пост. "
@@ -1119,7 +1237,11 @@ def webhook():
                     contents.append(prompt)
                     contents.append(media_part)
                 else:
-                    if is_kaleidoscope_cmd:
+                    if is_mafia_cmd:
+                        text_to_format = f"{reply_text}\n{user_text}".strip() if reply_text else user_text
+                        prompt = build_mafia_chronicle_prompt(text_to_format)
+                        contents.append(prompt)
+                    elif is_kaleidoscope_cmd:
                         date_str = get_current_date_ru()
                         text_to_format = reply_text if reply_text else user_text
                         
