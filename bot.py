@@ -82,7 +82,7 @@ def on_lobby_timeout():
             try:
                 bot.send_message(
                     chat_id,
-                    f"⏳ Время вышло, кворум не набран (собралось {players_count} из 4). Расходимся до следующей субботы!"
+                    f"⏳ Время вышло, кворум не набран (собралось {players_count} из 11). Расходимся до следующей субботы!"
                 )
             except Exception as e:
                 print(f"Ошибка отправки сообщения об отмене сбора: {e}")
@@ -867,7 +867,7 @@ def webhook():
                         pass
 
                 count = len(QUIZ_LOBBY["players"])
-                target_count = 4
+                target_count = 11
 
                 if count < target_count:
                     new_markup = telebot.types.InlineKeyboardMarkup()
@@ -1001,13 +1001,13 @@ def webhook():
                 target_chat = BREST_TALK_ID if chat_type == 'private' else chat_id
                 markup = telebot.types.InlineKeyboardMarkup()
                 markup.add(telebot.types.InlineKeyboardButton(
-                    text="🙋‍♂️ Я в деле (0 из 4)",
+                    text="🙋‍♂️ Я в деле (0 из 11)",
                     callback_data="lobby_join"
                 ))
 
                 lobby_text = (
                     "🎲 <b>Объявляется сбор участников на интеллектуальную викторину!</b>\n\n"
-                    "Для старта игры нужен кворум: минимум <b>4 участника</b>.\n"
+                    "Для старта игры нужен кворум: минимум <b>11 участников</b>.\n"
                     "Жмите кнопку ниже, чтобы занять место за столом. На сбор — <b>20 минут</b>."
                 )
 
