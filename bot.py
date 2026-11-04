@@ -1080,13 +1080,13 @@ def webhook():
                 target_chat = BREST_TALK_ID if chat_type == 'private' else chat_id
                 markup = telebot.types.InlineKeyboardMarkup()
                 markup.add(telebot.types.InlineKeyboardButton(
-                    text="🙋‍♂️ Я в деле (0 из 11)",
+                    text="🙋‍♂️ Я в деле (0 из 10)",
                     callback_data="lobby_join"
                 ))
 
                 lobby_text = (
                     "🎲 <b>Объявляется сбор участников на интеллектуальную викторину!</b>\n\n"
-                    "Для старта игры нужен кворум: минимум <b>11 участников</b>.\n"
+                    "Для старта игры нужен кворум: минимум <b>10 участников</b>.\n"
                     "Жмите кнопку ниже, чтобы занять место за столом. На сбор — <b>20 минут</b>."
                 )
 
