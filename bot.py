@@ -946,7 +946,7 @@ def webhook():
                         pass
 
                 count = len(QUIZ_LOBBY["players"])
-                target_count = 11
+                target_count = 10
 
                 if count < target_count:
                     new_markup = telebot.types.InlineKeyboardMarkup()
