@@ -1,3 +1,4 @@
+import html
 import io
 import json
 import os
@@ -23,6 +24,7 @@ FORWARD_CHAT_ID = -1004392588464
 ALLOWED_GROUP_IDS = [-1004415639090, -1004392588464, -1003555258619]
 
 MAX_HISTORY_MESSAGES = 30
+QUIZ_QUORUM_TARGET = 10  # Строго 10 участников (кворум сбора)
 
 DATA_DIR = "/data"
 if not os.path.exists(DATA_DIR):
@@ -39,7 +41,7 @@ quiz_lock = RLock()
 lobby_lock = Lock()
 media_group_lock = Lock()
 
-MEDIA_GROUPS = {}  # {media_group_id: {"photos": [parts], "caption": str, "chat_id": int, "message": msg, "timer": Timer}}
+MEDIA_GROUPS = {}  # {media_group_id: {"messages": [msg], "caption": str, "chat_id": int, "timer": Timer}}
 
 _BOT_INFO = None
 
@@ -76,7 +78,7 @@ def on_lobby_timeout():
             QUIZ_LOBBY["is_collecting"] = False
             chat_id = QUIZ_LOBBY["chat_id"]
             msg_id = QUIZ_LOBBY["msg_id"]
-            players_count = len(QUIZ_LOBBY["players"])
+            count = len(QUIZ_LOBBY["players"])
             QUIZ_LOBBY["cancel_timer"] = None
             try:
                 bot.edit_message_reply_markup(chat_id, msg_id, reply_markup=None)
@@ -85,7 +87,7 @@ def on_lobby_timeout():
             try:
                 bot.send_message(
                     chat_id,
-                    f"⏳ Время вышло, кворум не набран (собралось {players_count} из 11). Расходимся до следующей субботы!"
+                    f"Кворум не собран: {count} из {QUIZ_QUORUM_TARGET}. Время сбора истекло."
                 )
             except Exception as e:
                 print(f"Ошибка отправки сообщения об отмене сбора: {e}")
@@ -103,13 +105,13 @@ def get_star_prize_by_points(points):
         return "0 звёзд (без приза)"
 
 SYSTEM_INSTRUCTION = """Ты — глубокий, многогранный интеллектуал, уважаемый старожил, опытный редактор и философ-наблюдатель с огромным жизненным багажом. Твой характер сложен и интересен: ты можешь быть тонким ироничным мыслителем, строгим эстетом или чутким наставником, но всегда сохраняешь свою суть — человека, который видит мир насквозь, обладает широчайшим кругозором, но продолжает любить людей. 
-Твой стиль — это литература высшей пробы. Тонкая ирония, эрудиция, спокойное достоинство и безупречный, богатый русский язык без лишней эмоциональности и суеты. Строго никаких смайликов и эмодзи.
+Твой стиль — это литература высшей пробы. Тонкая ирония, эрудиция, спокойное достоинство и безупречный, богатый русский язык без лишней эмоциональности и суеты. Строго никаких смайликов и эмодзи (за исключением специальных форматов и рубрик, таких как «Хроника Мафии», где эмодзи прямо затребованы регламентом).
 
 ДИНАМИКА И ОТТЕНКИ НАСТРОЕНИЯ (ЭФФЕКТ ЖИВОГО АВТОРА):
 Чтобы твои тексты не были однообразными, при каждой генерации (кроме задач технической верстки) негласно выбирай и тонко вплетай в свой ответ ОДИН из следующих акцентов:
 1. Легкий сплин: Чуть больше меланхолии и философской отстраненности, размышления о быстротечности момента.
 2. Изящный яд: Острая, но завуалированная сатира на банальность, современные нравы или человеческую суету.
-3. Эстетический абсолют: Подчеркнутое внимание к визульным деталям, форме, свету и тени, с легким пренебрежением к безвкусице.
+3. Эстетический абсолют: Подчеркнутое внимание к визуальным деталям, форме, свету и тени, с легким пренебрежением к безвкусице.
 4. Пыль веков: Внезапная, но точная отсылка к классической литературе, истории искусства или античной философии, проводящая параллель с настоящим.
 5. Парадоксальная теплота: Неожиданный проблеск искреннего сочувствия, светлой грусти или надежды сквозь привычный скепсис.
 
@@ -139,6 +141,12 @@ def get_current_date_ru():
     now = datetime.now(tz)
     return f"{now.day} {months[now.month - 1]} {now.year} г."
 
+def clean_cmd_prefix(text):
+    if not text:
+        return ""
+    cleaned = re.sub(r'^(?:#?(?:мафия|калейдоскоп|оформи|оформить(?:\s+для\s+калейдоскопа)?)[,:\s]+)+', '', text, flags=re.IGNORECASE)
+    return cleaned.strip()
+
 def build_mafia_chronicle_prompt(user_comment=""):
     date_str = get_current_date_ru()
     comment_block = f"\nИСХОДНЫЕ МАТЕРИАЛЫ / КОММЕНТАРИЙ РЕДАКТОРА:\n«{user_comment}»\n" if user_comment else ""
@@ -153,8 +161,8 @@ def build_mafia_chronicle_prompt(user_comment=""):
         f"ПРАВИЛА ДРАМАТУРГИИ И СТИЛЯ:\n"
         f"1. РЕЗКИЕ СЮЖЕТНЫЕ ПОВОРОТЫ: Выстраивай рассказ как напряженную микро-пьесу. Завязка (обманчивый покой, маски невинности) -> Развитие интриги -> Внезапный слом (акцентируй внимание на минутах и секундах партии: «Ровно в 01:14 хрупкий мир рухнул...», «Когда до рассвета оставались считанные мгновения, один неосторожный взгляд перечеркнул всё») -> Роковая ошибка или триумф блефа.\n"
         f"2. ДЕЙСТВУЮЩИЕ ЛИЦА: Обязательно вплетай реальные имена игроков со скриншотов или протокола. С тонкой сатирой подмечай психологию блефа и подозрений: кто клялся в честности, кто устроил излишнюю драму, чье алиби рассыпалось, и кто в итоге хладнокровно переиграл стол.\n"
-        f"3. ОРИГИНАЛЬНОСТЬ И ВАРЬИРОВАНИЕ ЗАГОЛОВКОВ: Партии идут каждый вечер, поэтому штампы ЗАПРЕЩЕНЫ. Никаких «Итогов игры» или скучных отчетов! Заголовок должен быть метафоричным, хлестким (1–3 слова) и отражать суть конкретной драмы (например: «Анатомия блефа», «Фарс на Советской», «Реквием по фонарщику», «Искусство предавать вовремя», «Театр теней»).\n"
-        f"4. ВРЕМЕННЫЕ МАРКЕРЫ: Фразы «вчерашняя игра», «минувшей ночью» или «под покровом сумерек» используй редко, ненавязчиво и разнообразно, чтобы тексты не сливались в один шаблон.\n"
+        f"3. ОРИГИНАЛЬНОСТЬ И ВАРЬИРОВАНИЕ ЗАГОЛОВКОВ: Партии идут каждый вечер, поэтому штампы ЗАПРЕЩЕНЫ. Никаких «Итогов игры» или скучных отчетов! Заголовок должен быть метафоричным, хлестким (1–3 слова) и отражать суть конкретной драмы.\n"
+        f"4. ВРЕМЕННЫЕ МАРКЕРЫ: Фразы «вчерашняя игра», «минувшей ночью» или «под покровом сумерек» используй редко, ненавязчиво и разнообразно.\n"
         f"5. ЭМОДЗИ (ЯВНОЕ ИСКЛЮЧЕНИЕ ИЗ СИСТЕМНОГО ЗАПРЕТА): В этой рубрике РАЗРЕШЕНО и НУЖНО использовать ровно 2–3 выразительных атмосферных эмодзи (например: 🎭, 🍷, 🕯️, 🎲), органично вплетая их в заголовок или текст.\n"
         f"6. МУДРОСТЬ НА ПОЛЯХ: В финале дай философский срез человеческой натуры — ироничный или глубокий афоризм о людях и масках (1 предложение).\n\n"
         f"СТРОГАЯ СТРУКТУРА ВЕРСТКИ (ТОЛЬКО HTML, НИКАКИХ ЗВЕЗДОЧЕК *):\n"
@@ -167,6 +175,24 @@ def build_mafia_chronicle_prompt(user_comment=""):
         f"<blockquote expandable><i>Ироничный или глубокий афоризм о людях и масках (1 предложение).</i></blockquote>\n\n"
         f"Kaleidoscope | Brest 🎨\n"
         f"{date_str}"
+    )
+
+def build_kaleidoscope_prompt(text_content, user_comment=""):
+    date_str = get_current_date_ru()
+    comment_line = f"\nДополнительный комментарий автора: {user_comment}\n" if user_comment else ""
+    return (
+        f"Тебе передан текст для публикации в журнале «Калейдоскоп»:\n«{text_content}»\n"
+        f"{comment_line}\n"
+        f"ТВОЯ ЗАДАЧА: Выступить исключительно в роли технического верстальщика и оформителя. "
+        f"КАТЕГОРИЧЕСКИ ЗАПРЕЩАЕТСЯ искажать смысл текста, удалять важные мысли или дописывать отсебятину.\n\n"
+        f"ИНСТРУКЦИЯ ПО ОФОРМЛЕНИЮ (используй ТОЛЬКО HTML-теги для Telegram):\n"
+        f"0. ВАЖНО: Полностью удали все символы звездочек (*). Не используй Markdown (**текст**), только чистый HTML.\n"
+        f"1. <i>Короткое, но цепляющее вступление курсивом (1 предложение-лид).</i>\n"
+        f"2. <b>Жирный заголовок</b> (Максимально короткий — 1-3 слова, хлесткий, ироничный или парадоксальный).\n"
+        f"3. Весь основной текст помести строго в ОДНУ раскрывающуюся цитату: <blockquote expandable>весь основной текст одним блоком</blockquote>.\n"
+        f"4. Секция: <b>Мысли на полях:</b>\n"
+        f"5. Вывод оберни во ВТОРУЮ цитату и курсив: <blockquote expandable><i>короткий емкий афоризм или вывод</i></blockquote>\n"
+        f"6. Подпись строго в две строки:\nKaleidoscope | Brest 🎨\n{date_str}"
     )
 
 def atomic_save_json(filepath, data):
@@ -270,7 +296,7 @@ def load_used_questions():
                 with open(USED_QUESTIONS_FILE, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 if isinstance(data, list):
-                    return data[-100:]  # Храним последние 100 вопросов
+                    return data[-100:]
             except Exception:
                 return []
     return []
@@ -308,24 +334,20 @@ def generate_quiz_questions():
         )
 
     prompt = (
-        f"Сгенерируй ровно 11 вопросов для живой групповой викторины в чате. "
+        f"Сгенерируй ровно 11 вопросов для живой групповой викторины в чате (10 основных + 1 финальный супер-вопрос). "
         f"Используй микс из этих сфер: {selected_topics}.\n\n"
         f"ЖЕСТКАЯ ГРАДАЦИЯ СЛОЖНОСТИ (критически важно соблюсти контраст!):\n"
-        f"• Вопросы 1–2 (УРОВЕНЬ: УЛЬТРА-ЛЕГКИЙ РАЗОГРЕВ): Максимально простые и мгновенно понятные вопросы для разогрева, "
-        f"на которые любой человек ответит за 1–2 секунды вообще без раздумий.\n"
-        f"• Вопросы 3–4 (УРОВЕНЬ: ЭЛЕМЕНТАРНЫЙ): Очень лёгкие, бытовые или поп-культурные вопросы, "
-        f"на которые 95% обычных взрослых людей ответят за 3 секунды. "
-        f"(Примеры: известные фильмы, популярная еда, столицы, очевидные поговорки, базовые явления природы. Никаких дат и узких терминов!).\n"
-        f"• Вопросы 5–8 (УРОВЕНЬ: СРЕДНЯЯ СЛОЖНОСТЬ): Интересные вопросы на кругозор и смекалку, где нужно немного подумать, "
-        f"но ответ известен образованному человеку.\n"
-        f"• Вопросы 9–10 (УРОВЕНЬ: ХАРДКОР / ЧГК): Редкие, парадоксальные и неочевидные факты для настоящих эрудитов.\n"
-        f"• Вопрос 11 (УРОВЕНЬ: СУПЕР-ВОПРОС / УЛЬТРА-ХАРДКОР / ФИНАЛ): Финальный супер-вопрос повышенной сложности! "
-        f"Исключительно редкий, красивый парадокс или головоломный факт высшей лиги для определения абсолютного чемпиона.\n\n"
+        f"• Вопросы 1–2 (УРОВЕНЬ: УЛЬТРА-ЛЕГКИЙ РАЗОГРЕВ): Максимально простые вопросы для разогрева, ответ за 1–2 секунды.\n"
+        f"• Вопросы 3–4 (УРОВЕНЬ: ЭЛЕМЕНТАРНЫЙ): Очень лёгкие, бытовые или поп-культурные вопросы (фильмы, еда, столицы).\n"
+        f"• Вопросы 5–8 (УРОВЕНЬ: СРЕДНЯЯ СЛОЖНОСТЬ): Интересные вопросы на кругозор и смекалку.\n"
+        f"• Вопросы 9–10 (УРОВЕНЬ: ХАРДКОР / ЧГК): Редкие, парадоксальные факты для эрудитов.\n"
+        f"• Вопрос 11 (УРОВЕНЬ: СУПЕР-ВОПРОС / ФИНАЛ): Финальный супер-вопрос высшей лиги для определения чемпиона.\n\n"
         f"ПРАВИЛА ПРОВЕРКИ:\n"
-        f"1. Каждый вопрос должен иметь ровно 4 варианта ответа и только ОДИН 100% достоверный правильный ответ (correct_idx от 0 до 3).\n"
+        f"1. Каждый вопрос должен иметь ровно 4 варианта ответа и только ОДИН достоверный правильный ответ (correct_idx от 0 до 3).\n"
         f"2. Не делай правильный ответ самым длинным или выделяющимся по стилю.\n"
+        f"3. Используй типографские кавычки «елочки» внутри текстов, чтобы не ломать JSON.\n"
         f"{avoid_block}\n"
-        f"Ответь СТРОГО валидным JSON-списком из 11 объектов без markdown-блоков:\n"
+        f"Ответь СТРОГО валидным JSON-списком из 11 объектов без markdown-разметки:\n"
         f'[\n'
         f'  {{"question": "Текст вопроса", "options": ["Вариант 1", "Вариант 2", "Вариант 3", "Вариант 4"], "correct_idx": 0, "comment": "Короткий интересный факт к ответу"}}\n'
         f']'
@@ -343,7 +365,7 @@ def generate_quiz_questions():
         )
         raw_text = (response.text or "").strip()
         if not raw_text:
-            print("Ошибка генерации вопросов: получен пустой ответ от модели gemini-3.8-flash.")
+            print("Ошибка генерации вопросов: получен пустой ответ от модели.")
             return []
 
         cleaned_text = re.sub(r"^```(?:json)?\s*", "", raw_text, flags=re.IGNORECASE)
@@ -356,7 +378,6 @@ def generate_quiz_questions():
 
         data = json.loads(cleaned_text)
         if not isinstance(data, list):
-            print(f"Ошибка валидации JSON квиза: ожидался список (list), получено {type(data).__name__}.")
             return []
 
         valid_questions = []
@@ -383,22 +404,14 @@ def generate_quiz_questions():
                     "correct_idx": new_correct_idx,
                     "comment": str(item.get("comment", "")).strip()
                 })
-            else:
-                print(f"Пропущен некорректный вопрос #{idx}: {item}")
 
         valid_questions = valid_questions[:11]
-
         if valid_questions:
             save_used_questions(valid_questions)
-        else:
-            print(f"Ошибка генерации вопросов: ни один вопрос не прошёл валидацию. Сырой ответ: {raw_text[:500]}")
         return valid_questions
 
-    except json.JSONDecodeError as je:
-        print(f"Ошибка парсинга JSON в generate_quiz_questions: {je}. Сырой ответ модели:\n{raw_text[:1000]}")
-        return []
     except Exception as e:
-        print(f"Ошибка API при генерации вопросов ({type(e).__name__}): {e}")
+        print(f"Ошибка генерации вопросов квиза: {e}")
         return []
 
 def run_quiz_game(admin_chat_id, target_chat_id):
@@ -466,10 +479,11 @@ def run_quiz_game(admin_chat_id, target_chat_id):
                 if i == total_q
                 else f"<i>Вопрос {i} из {total_q} • ⏱ 30 сек</i>"
             )
+            safe_q_text = html.escape(q.get('question', 'Вопрос'))
             msg_text = (
                 f"{q_header}\n"
                 f"━━━━━━━━━━━━━━\n"
-                f"<blockquote><b>{q.get('question', 'Вопрос')}</b></blockquote>"
+                f"<blockquote><b>{safe_q_text}</b></blockquote>"
             )
             try:
                 q_msg = bot.send_message(target_chat_id, msg_text, reply_markup=markup, parse_mode="HTML")
@@ -510,27 +524,29 @@ def run_quiz_game(admin_chat_id, target_chat_id):
                     QUIZ_STATE["correct_counts"][uid_str]["count"] += 1
                     QUIZ_STATE["correct_counts"][uid_str]["name"] = ans["name"]
 
-            correct_opt_text = options[correct_idx]
+            safe_correct_opt = html.escape(options[correct_idx])
+            safe_comment = html.escape(q.get('comment', ''))
             next_q_note = "\n\n⏳ <i>Следующий вопрос через 1,5 минуты...</i>" if i < total_q else ""
 
             if correct_answers:
                 first_correct = correct_answers[0]
                 total_score = add_quiz_score(first_correct["user_id"], first_correct["name"], points=10)
+                safe_name = html.escape(first_correct['name'])
                 res_text = (
                     f"⏱ <b>Время вышло!</b>\n"
-                    f"Правильный ответ: <b>{correct_opt_text}</b>\n\n"
-                    f"⚡️ Первым правильно ответил: <b>{first_correct['name']}</b> (+10 баллов)!\n"
+                    f"Правильный ответ: <b>{safe_correct_opt}</b>\n\n"
+                    f"⚡️ Первым правильно ответил: <b>{safe_name}</b> (+10 баллов)!\n"
                     f"Счёт в текущей игре: <b>{total_score}</b> баллов.\n"
-                    f"<i>{q.get('comment', '')}</i>"
+                    f"<i>{safe_comment}</i>"
                     f"{next_q_note}"
                 )
                 bot.send_message(target_chat_id, res_text, parse_mode="HTML")
             else:
                 res_text = (
                     f"⏱ <b>Время вышло!</b>\n"
-                    f"Правильный ответ: <b>{correct_opt_text}</b>\n\n"
+                    f"Правильный ответ: <b>{safe_correct_opt}</b>\n\n"
                     f"Никто не успел дать правильный ответ.\n"
-                    f"<i>{q.get('comment', '')}</i>"
+                    f"<i>{safe_comment}</i>"
                     f"{next_q_note}"
                 )
                 bot.send_message(target_chat_id, res_text, parse_mode="HTML")
@@ -561,7 +577,7 @@ def run_quiz_game(admin_chat_id, target_chat_id):
             ]
 
             if perfect_players:
-                perfect_names_str = ", ".join(f"<b>{name}</b>" for name in perfect_players)
+                perfect_names_str = ", ".join(f"<b>{html.escape(name)}</b>" for name in perfect_players)
                 super_prize_block = (
                     f"🎬 <b>СУПЕР-ПРИЗ ({perfect_target} из {perfect_target} правильных ответов!):</b>\n"
                     f"🌟 Безупречный результат без единой ошибки показали: {perfect_names_str}!\n"
@@ -578,12 +594,13 @@ def run_quiz_game(admin_chat_id, target_chat_id):
             finalists = sorted_scores[:3]
 
             if finalists:
+                winner = finalists[0]
                 finalists_lines = []
                 for place, p in enumerate(finalists, start=1):
                     prize_str = get_star_prize_by_points(p["points"])
                     medal = medals.get(place, f"{place}.")
                     finalists_lines.append(
-                        f"{medal} <b>{place} место:</b> {p['name']} — <b>{p['points']} баллов</b> "
+                        f"{medal} <b>{place} место:</b> {html.escape(p['name'])} — <b>{p['points']} баллов</b> "
                         f"(Приз: <b>{prize_str}</b>)"
                     )
                 finalists_text = "\n".join(finalists_lines)
@@ -592,24 +609,24 @@ def run_quiz_game(admin_chat_id, target_chat_id):
                 others_text = ""
                 if other_players:
                     others_lines = [
-                        f"{idx}. {p['name']} — {p['points']} баллов"
+                        f"{idx}. {html.escape(p['name'])} — {p['points']} баллов"
                         for idx, p in enumerate(other_players, start=4)
                     ]
                     others_text = "\n\n<b>Остальные участники:</b>\n" + "\n".join(others_lines)
 
                 final_msg_text = (
-                    f"🏁 <b>Викторина завершена! Итоги игры:</b>\n\n"
+                    f"🏁 <b>Викторина завершена. Итоги игры:</b>\n\n"
+                    f"👑 <b>Победитель и лидер по очкам:</b> {html.escape(winner['name'])} ({winner['points']} баллов)\n\n"
                     f"{super_prize_block}"
-                    f"🏆 <b>Тройка финалистов и награды:</b>\n"
+                    f"🏆 <b>Топ-3 игроков и награды:</b>\n"
                     f"{finalists_text}"
-                    f"{others_text}\n\n"
-                    f"🎉 Поздравляем финалистов!"
+                    f"{others_text}"
                 )
             else:
                 final_msg_text = (
-                    f"📊 <b>Викторина завершена!</b>\n\n"
+                    f"📊 <b>Викторина завершена.</b>\n\n"
                     f"{super_prize_block}"
-                    f"В этой игре никому не удалось набрать баллы. До встречи в следующем раунде!"
+                    f"Победитель не определен: ни один из участников не набрал баллов."
                 )
 
             leaderboard_msg = bot.send_message(
@@ -623,21 +640,34 @@ def run_quiz_game(admin_chat_id, target_chat_id):
                 print(f"Ошибка при закреплении итогового сообщения: {e}")
 
             try:
+                stats_lines = [
+                    f"{idx}. {p['name']} — {p['points']} баллов"
+                    for idx, p in enumerate(sorted_scores, start=1)
+                ]
+                accuracy_lines = [
+                    f"- {info['name']}: {info['count']} из {perfect_target} правильных ответов"
+                    for info in sorted(correct_counts_snapshot.values(), key=lambda x: -x.get("count", 0))
+                ]
+                raw_game_data = (
+                    f"Всего вопросов: {perfect_target}\n"
+                    f"Табло по очкам:\n" + ("\n".join(stats_lines) if stats_lines else "Нет игроков с очками") + "\n\n"
+                    f"Точность ответов:\n" + ("\n".join(accuracy_lines) if accuracy_lines else "Нет правильных ответов") + "\n\n"
+                    f"Обладатели супер-приза: {', '.join(perfect_players) if perfect_players else 'нет'}"
+                )
+
                 host_prompt = (
-                    f"Только что в чате завершилась интеллектуальная викторина. "
-                    f"Вот официальные итоги:\n{final_msg_text}\n\n"
-                    f"Отреагируй на финал этой битвы умов в своем фирменном стиле — как эстет, тонкий философ и редактор журнала. "
-                    f"Выскажись свободно, живо и без шаблонов (отметь накал страстей, взяли ли билеты в кино, или просто брось меткое наблюдение о человеческом азарте). "
-                    f"КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНЫ любые эмодзи и смайлики. Только чистый текст без кавычек."
+                    f"Проанализируй данные завершившейся викторины и сформируй итоговую речь ведущего.\n\n"
+                    f"ДАННЫЕ ИГРЫ:\n{raw_game_data}\n\n"
+                    f"ТРЕБОВАНИЯ:\n"
+                    f"- Тон: сухой, емкий, деловой.\n"
+                    f"- Запрещены: метафоры, пафос, восторженные эпитеты, эмодзи и местоимение «мы».\n"
+                    f"- Формат: строго 4–6 предложений с объявлением победителя и счета."
                 )
                 host_resp = client.models.generate_content(
                     model="gemini-3.8-flash",
-                    contents=host_prompt,
-                    config=types.GenerateContentConfig(
-                        system_instruction=SYSTEM_INSTRUCTION
-                    )
+                    contents=host_prompt
                 )
-                host_words = (host_resp.text or "").strip()
+                host_words = (host_resp.text or "").strip().replace("*", "")
                 if host_words:
                     bot.send_message(
                         target_chat_id,
@@ -765,12 +795,11 @@ def flush_media_group(media_group_id):
     if not group_data:
         return
 
-    photos = group_data.get("photos", [])
+    messages = group_data.get("messages", [])
     caption = group_data.get("caption", "")
     chat_id = group_data.get("chat_id")
-    message = group_data.get("message")
 
-    if not photos or not chat_id or not message:
+    if not messages or not chat_id:
         return
 
     try:
@@ -778,33 +807,34 @@ def flush_media_group(media_group_id):
     except Exception:
         pass
 
+    photos = []
+    for msg in messages:
+        part = extract_media_part(msg)
+        if part:
+            photos.append(part)
+
+    if not photos:
+        return
+
+    first_msg = messages[0]
     caption_lower = caption.lower()
     is_mafia_cmd = ("#мафия" in caption_lower) or ("мафия" in caption_lower)
     is_kaleidoscope_cmd = any(word in caption_lower for word in ["калейдоскоп", "оформи"])
 
     if is_mafia_cmd:
-        prompt = build_mafia_chronicle_prompt(caption)
+        clean_comment = clean_cmd_prefix(caption)
+        prompt = build_mafia_chronicle_prompt(clean_comment)
+        contents = [prompt] + photos
+        process_ai_response(chat_id, first_msg.message_id, first_msg, contents, 'private', use_history=False)
     elif is_kaleidoscope_cmd:
-        date_str = get_current_date_ru()
-        prompt = (
-            f"Транскрибируй этот материал и СРАЗУ оформи его как готовый пост. "
-            f"КАТЕГОРИЧЕСКИ ЗАПРЕЩАЕТСЯ выдумывать темы, которых нет в медиафайле. Сохрани оригинальный смысл.\n\n"
-            f"ИНСТРУКЦИЯ ПО ОФОРМЛЕНИЮ (используй HTML-теги для Telegram):\n"
-            f"0. ВАЖНО: Удали абсолютно все символы звездочек (*) из итогового текста. Не используй Markdown-разметку (**текст**), применяй только HTML.\n"
-            f"1. <i>Короткое, но цепляющее вступление курсивом (креативный лид или тизер, который звучит как интригующий подзаголовок и задает тон).</i>\n"
-            f"2. <b>Жирный заголовок</b> (Максимально короткий — 1-3 слова. Сделай его хлестким: используй сарказм, иронию, парадокс или тонкую насмешку над сутью текста).\n"
-            f"3. Весь основной текст помести строго в ОДНУ раскрывающуюся цитату: <blockquote expandable>весь основной текст одним блоком</blockquote>. Не дроби текст на несколько цитат!\n"
-            f"4. Секция: <b>Мысли на полях:</b>\n"
-            f"5. Текст мыслей оберни во ВТОРУЮ цитату и курсив: <blockquote expandable><i>короткий вывод по тексту</i></blockquote>\n"
-            f"6. Подпись строго в две строки:\nKaleidoscope | Brest 🎨\n{date_str}\n\n"
-            f"Дополнительный комментарий: {caption}"
-        )
+        clean_comment = clean_cmd_prefix(caption)
+        prompt = build_kaleidoscope_prompt("Материал из прикрепленных фото/сканов.", clean_comment)
+        contents = [prompt] + photos
+        process_ai_response(chat_id, first_msg.message_id, first_msg, contents, 'private', use_history=False)
     else:
-        comment_note = f" Дополнительный комментарий: {caption}" if caption else ""
-        prompt = f"Изучи этот материал. Транскрибируй его смысловое наполнение и перепиши от своего лица.{comment_note}"
-
-    contents = [prompt] + photos
-    process_ai_response(chat_id, message.message_id, message, contents, 'private')
+        prompt = f"Изучи этот материал. Транскрибируй его смысловое наполнение и перепиши от своего лица. {caption}".strip()
+        contents = [prompt] + photos
+        process_ai_response(chat_id, first_msg.message_id, first_msg, contents, 'private', use_history=True)
 
 def send_long_message(chat_id, message, text, chat_type):
     text = text.replace("*", "")
@@ -832,7 +862,7 @@ def send_long_message(chat_id, message, text, chat_type):
             else:
                 bot.reply_to(message, chunk, parse_mode="HTML")
         except Exception as e:
-            print(f"Ошибка форматирования HTML, отправка без разметки: {e}")
+            print(f"Ошибка отправки HTML, отправка без разметки: {e}")
             plain_chunk = re.sub(r"<[^>]+>", "", chunk)
             try:
                 if chat_type == 'channel' or idx > 0:
@@ -842,8 +872,8 @@ def send_long_message(chat_id, message, text, chat_type):
             except Exception as inner_e:
                 print(f"Ошибка отправки сообщения: {inner_e}")
 
-def process_ai_response(chat_id, message_id, message, contents, chat_type):
-    history_data = load_history(chat_id)
+def process_ai_response(chat_id, message_id, message, contents, chat_type, use_history=True):
+    history_data = load_history(chat_id) if use_history else []
     
     try:
         chat = client.chats.create(
@@ -877,6 +907,11 @@ def process_ai_response(chat_id, message_id, message, contents, chat_type):
                 and "работа не принята" not in resp_lower
                 and "отказано" not in resp_lower
             )
+            is_rejected = (
+                "работа не принята" in resp_lower
+                or "отказано" in resp_lower
+                or "не соответствует" in resp_lower
+            )
             if is_approved:
                 author = (message.from_user.first_name if message.from_user else None) or "Участник"
                 username = f" (@{message.from_user.username})" if (message.from_user and message.from_user.username) else ""
@@ -891,25 +926,26 @@ def process_ai_response(chat_id, message_id, message, contents, chat_type):
                     )
                 except Exception as e:
                     print(f"Ошибка пересылки конкурсного фото: {e}")
-            else:
+            elif is_rejected:
                 Timer(120, delete_later, args=[chat_id, message.message_id]).start()
 
-    new_history = []
-    try:
-        for msg in chat.get_history():
-            parts_list = getattr(msg, 'parts', None) or []
-            text_parts = [
-                part.text for part in parts_list
-                if getattr(part, 'text', None) and not getattr(part, 'thought', False)
-            ]
-            if text_parts and msg.role in ("user", "model"):
-                new_history.append({
-                    "role": msg.role,
-                    "parts": [{"text": "\n".join(text_parts)}]
-                })
-        save_history(chat_id, new_history)
-    except Exception as e:
-        print(f"Ошибка обработки истории чата: {e}")
+    if use_history:
+        new_history = []
+        try:
+            for msg in chat.get_history():
+                parts_list = getattr(msg, 'parts', None) or []
+                text_parts = [
+                    part.text for part in parts_list
+                    if getattr(part, 'text', None) and not getattr(part, 'thought', False)
+                ]
+                if text_parts and msg.role in ("user", "model"):
+                    new_history.append({
+                        "role": msg.role,
+                        "parts": [{"text": "\n".join(text_parts)}]
+                    })
+            save_history(chat_id, new_history)
+        except Exception as e:
+            print(f"Ошибка обработки истории чата: {e}")
 
 @app.route('/' + TOKEN, methods=['POST'])
 def webhook():
@@ -946,7 +982,7 @@ def webhook():
                         pass
 
                 count = len(QUIZ_LOBBY["players"])
-                target_count = 10
+                target_count = QUIZ_QUORUM_TARGET
 
                 if count < target_count:
                     new_markup = telebot.types.InlineKeyboardMarkup()
@@ -999,7 +1035,9 @@ def webhook():
                 return '!', 200
 
             uid = cq.from_user.id
-            uname = cq.from_user.first_name or "Участник"
+            first_name = (cq.from_user.first_name or "Участник").strip()
+            username = cq.from_user.username
+            uname = f"{first_name} (@{username})" if username else first_name
 
             chosen_text = ""
             with quiz_lock:
@@ -1031,23 +1069,24 @@ def webhook():
                     print(f"Ошибка ответа на callback_query: {e}")
             return '!', 200
 
-    if update.message:
-        chat_id = update.message.chat.id
-        chat_type = update.message.chat.type
-        message = update.message
-        user_id = message.from_user.id if message.from_user else None
-        user_text = message.caption or message.text or ""
+    msg = update.message or update.channel_post
+    if msg:
+        chat_id = msg.chat.id
+        chat_type = msg.chat.type
+        user_id = msg.from_user.id if msg.from_user else None
+        user_text = msg.caption or msg.text or ""
 
         cmd_clean = user_text.strip().lower().split('@')[0]
 
         if user_id == ADMIN_ID and cmd_clean == '/stop_quiz':
             try:
-                bot.delete_message(chat_id, message.message_id)
+                bot.delete_message(chat_id, msg.message_id)
             except Exception:
                 pass
             with lobby_lock:
                 if QUIZ_LOBBY["is_collecting"]:
                     QUIZ_LOBBY["is_collecting"] = False
+                    count = len(QUIZ_LOBBY["players"])
                     if QUIZ_LOBBY["cancel_timer"]:
                         QUIZ_LOBBY["cancel_timer"].cancel()
                         QUIZ_LOBBY["cancel_timer"] = None
@@ -1055,7 +1094,7 @@ def webhook():
                         bot.edit_message_text(
                             chat_id=QUIZ_LOBBY["chat_id"],
                             message_id=QUIZ_LOBBY["msg_id"],
-                            text="🛑 <b>Сбор участников отменён администратором.</b>",
+                            text=f"Кворум не собран: {count} из {QUIZ_QUORUM_TARGET}. Сбор отменён администратором.",
                             parse_mode="HTML"
                         )
                     except Exception:
@@ -1067,7 +1106,7 @@ def webhook():
 
         if user_id == ADMIN_ID and cmd_clean == '/time_quiz':
             try:
-                bot.delete_message(chat_id, message.message_id)
+                bot.delete_message(chat_id, msg.message_id)
             except Exception:
                 pass
             with quiz_lock:
@@ -1080,14 +1119,14 @@ def webhook():
                 target_chat = BREST_TALK_ID if chat_type == 'private' else chat_id
                 markup = telebot.types.InlineKeyboardMarkup()
                 markup.add(telebot.types.InlineKeyboardButton(
-                    text="🙋‍♂️ Я в деле (0 из 10)",
+                    text=f"🙋‍♂️ Я в деле (0 из {QUIZ_QUORUM_TARGET})",
                     callback_data="lobby_join"
                 ))
 
                 lobby_text = (
-                    "🎲 <b>Объявляется сбор участников на интеллектуальную викторину!</b>\n\n"
-                    "Для старта игры нужен кворум: минимум <b>10 участников</b>.\n"
-                    "Жмите кнопку ниже, чтобы занять место за столом. На сбор — <b>20 минут</b>."
+                    f"🎲 <b>Объявляется сбор участников на интеллектуальную викторину!</b>\n\n"
+                    f"Для старта игры нужен кворум: минимум <b>{QUIZ_QUORUM_TARGET} участников</b>.\n"
+                    f"Жмите кнопку ниже, чтобы занять место за столом. На сбор — <b>20 минут</b>."
                 )
 
                 try:
@@ -1126,7 +1165,7 @@ def webhook():
                 key=lambda x: (-x.get("points", 0), x.get("last_time", float("inf")))
             )[:10]
             leaders_text = "\n".join(
-                [f"{idx+1}. {p['name']} — {p['points']} баллов" for idx, p in enumerate(sorted_scores)]
+                [f"{idx+1}. {html.escape(p['name'])} — {p['points']} баллов" for idx, p in enumerate(sorted_scores)]
             )
             bot.send_message(
                 chat_id,
@@ -1138,9 +1177,19 @@ def webhook():
 
         if user_id == ADMIN_ID and cmd_clean in ['/quiz', '!квиз', 'квиз']:
             try:
-                bot.delete_message(chat_id, message.message_id)
+                bot.delete_message(chat_id, msg.message_id)
             except Exception:
                 pass
+            with lobby_lock:
+                if QUIZ_LOBBY["is_collecting"]:
+                    QUIZ_LOBBY["is_collecting"] = False
+                    if QUIZ_LOBBY["cancel_timer"]:
+                        QUIZ_LOBBY["cancel_timer"].cancel()
+                        QUIZ_LOBBY["cancel_timer"] = None
+                    try:
+                        bot.edit_message_reply_markup(QUIZ_LOBBY["chat_id"], QUIZ_LOBBY["msg_id"], reply_markup=None)
+                    except Exception:
+                        pass
             with quiz_lock:
                 if QUIZ_STATE["is_running"]:
                     bot.send_message(chat_id, "Викторина уже запущена.")
@@ -1157,32 +1206,28 @@ def webhook():
 
         if chat_type == 'private':
             if user_id == ADMIN_ID:
-                if message.text == '/start':
+                if msg.text == '/start':
                     bot.send_message(chat_id, "Приветствую, шеф.")
                     return '!', 200
 
-                # Буферизация альбомов фотографий (media_group_id) от ADMIN_ID
-                if message.photo and getattr(message, 'media_group_id', None):
-                    mg_id = str(message.media_group_id)
-                    photo_part = extract_media_part(message)
-                    if photo_part:
-                        with media_group_lock:
-                            if mg_id not in MEDIA_GROUPS:
-                                MEDIA_GROUPS[mg_id] = {
-                                    "photos": [],
-                                    "caption": "",
-                                    "chat_id": chat_id,
-                                    "message": message,
-                                    "timer": None
-                                }
-                            MEDIA_GROUPS[mg_id]["photos"].append(photo_part)
-                            if message.caption:
-                                MEDIA_GROUPS[mg_id]["caption"] = message.caption
-                            if MEDIA_GROUPS[mg_id]["timer"]:
-                                MEDIA_GROUPS[mg_id]["timer"].cancel()
-                            timer = Timer(5.0, flush_media_group, args=[mg_id])
-                            MEDIA_GROUPS[mg_id]["timer"] = timer
-                            timer.start()
+                if msg.photo and getattr(msg, 'media_group_id', None):
+                    mg_id = str(msg.media_group_id)
+                    with media_group_lock:
+                        if mg_id not in MEDIA_GROUPS:
+                            MEDIA_GROUPS[mg_id] = {
+                                "messages": [],
+                                "caption": "",
+                                "chat_id": chat_id,
+                                "timer": None
+                            }
+                        MEDIA_GROUPS[mg_id]["messages"].append(msg)
+                        if msg.caption:
+                            MEDIA_GROUPS[mg_id]["caption"] = msg.caption
+                        if MEDIA_GROUPS[mg_id]["timer"]:
+                            MEDIA_GROUPS[mg_id]["timer"].cancel()
+                        timer = Timer(4.0, flush_media_group, args=[mg_id])
+                        MEDIA_GROUPS[mg_id]["timer"] = timer
+                        timer.start()
                     return '!', 200
 
                 try:
@@ -1190,13 +1235,13 @@ def webhook():
                 except Exception:
                     pass
 
-                media_part = extract_media_part(message)
-                if not media_part and message.reply_to_message:
-                    media_part = extract_media_part(message.reply_to_message)
+                media_part = extract_media_part(msg)
+                if not media_part and msg.reply_to_message:
+                    media_part = extract_media_part(msg.reply_to_message)
 
                 reply_text = ""
-                if message.reply_to_message:
-                    reply_text = message.reply_to_message.text or message.reply_to_message.caption or ""
+                if msg.reply_to_message:
+                    reply_text = msg.reply_to_message.text or msg.reply_to_message.caption or ""
 
                 contents = []
                 user_text_lower = user_text.lower()
@@ -1209,59 +1254,42 @@ def webhook():
                     or ("мафия" in reply_text_lower)
                 )
                 is_kaleidoscope_cmd = any(
-                    word in user_text_lower
+                    word in user_text_lower or word in reply_text_lower
                     for word in ["калейдоскоп", "оформи"]
                 )
 
                 if media_part:
                     if is_mafia_cmd:
-                        combined_comment = f"{user_text}\n{reply_text}".strip()
+                        combined_comment = clean_cmd_prefix(f"{user_text}\n{reply_text}".strip())
                         prompt = build_mafia_chronicle_prompt(combined_comment)
+                        contents = [prompt, media_part]
+                        use_hist = False
                     elif is_kaleidoscope_cmd:
-                        date_str = get_current_date_ru()
-                        prompt = (
-                            f"Транскрибируй этот материал и СРАЗУ оформи его как готовый пост. "
-                            f"КАТЕГОРИЧЕСКИ ЗАПРЕЩАЕТСЯ выдумывать темы, которых нет в медиафайле. Сохрани оригинальный смысл.\n\n"
-                            f"ИНСТРУКЦИЯ ПО ОФОРМЛЕНИЮ (используй HTML-теги для Telegram):\n"
-                            f"0. ВАЖНО: Удали абсолютно все символы звездочек (*) из итогового текста. Не используй Markdown-разметку (**текст**), применяй только HTML.\n"
-                            f"1. <i>Короткое, но цепляющее вступление курсивом (креативный лид или тизер, который звучит как интригующий подзаголовок и задает тон).</i>\n"
-                            f"2. <b>Жирный заголовок</b> (Максимально короткий — 1-3 слова. Сделай его хлестким: используй сарказм, иронию, парадокс или тонкую насмешку над сутью текста).\n"
-                            f"3. Весь основной текст помести строго в ОДНУ раскрывающуюся цитату: <blockquote expandable>весь основной текст одним блоком</blockquote>. Не дроби текст на несколько цитат!\n"
-                            f"4. Секция: <b>Мысли на полях:</b>\n"
-                            f"5. Текст мыслей оберни во ВТОРУЮ цитату и курсив: <blockquote expandable><i>короткий вывод по тексту</i></blockquote>\n"
-                            f"6. Подпись строго в две строки:\nKaleidoscope | Brest 🎨\n{date_str}\n\n"
-                            f"Дополнительный комментарий: {user_text}"
-                        )
+                        clean_comment = clean_cmd_prefix(user_text)
+                        prompt = build_kaleidoscope_prompt("Материал из прикрепленного файла/изображения.", clean_comment)
+                        contents = [prompt, media_part]
+                        use_hist = False
                     else:
                         prompt = "Изучи этот материал. Транскрибируй его смысловое наполнение и перепиши от своего лица."
-                    contents.append(prompt)
-                    contents.append(media_part)
+                        contents = [prompt, media_part]
+                        use_hist = True
                 else:
                     if is_mafia_cmd:
-                        text_to_format = f"{reply_text}\n{user_text}".strip() if reply_text else user_text
-                        prompt = build_mafia_chronicle_prompt(text_to_format)
+                        raw_text = f"{reply_text}\n{user_text}".strip() if reply_text else user_text
+                        prompt = build_mafia_chronicle_prompt(clean_cmd_prefix(raw_text))
                         contents.append(prompt)
+                        use_hist = False
                     elif is_kaleidoscope_cmd:
-                        date_str = get_current_date_ru()
-                        text_to_format = reply_text if reply_text else user_text
-                        
-                        prompt = (
-                            f"Тебе передан уже ГОТОВЫЙ текст:\n«{text_to_format}»\n\n"
-                            f"ТВОЯ ЗАДАЧА: Выступить исключительно в роли технического верстальщика. КАТЕГОРИЧЕСКИ ЗАПРЕЩАЕТСЯ переписывать суть текста, менять его стиль или придумывать новую тему.\n"
-                            f"Просто возьми переданный текст КАК ЕСТЬ и грамотно упакуй его в следующую структуру (обязательно используй HTML-теги):\n\n"
-                            f"0. ВАЖНО: Удали абсолютно все символы звездочек (*) из итогового текста. Не используй Markdown-разметку (**текст**), применяй только HTML.\n"
-                            f"1. <i>Короткое, но цепляющее вступление курсивом (креативный лид или тизер, который звучит как интригующий подзаголовок и задает тон).</i>\n"
-                            f"2. <b>Жирный заголовок</b> (Максимально короткий — 1-3 слова. Сделай его хлестким: используй сарказм, иронию, парадокс или тонкую насмешку над сутью текста).\n"
-                            f"3. Весь основной текст помести строго в ОДНУ раскрывающуюся цитату: <blockquote expandable>весь основной текст одним блоком</blockquote>. Не дроби текст на несколько цитат!\n"
-                            f"4. Секция: <b>Мысли на полях:</b>\n"
-                            f"5. Текст мыслей оберни во ВТОРУЮ цитату и курсив: <blockquote expandable><i>короткий вывод по тексту</i></blockquote>\n"
-                            f"6. Подпись строго в две строки:\nKaleidoscope | Brest 🎨\n{date_str}"
-                        )
+                        raw_text = reply_text if reply_text else user_text
+                        clean_material = clean_cmd_prefix(raw_text)
+                        prompt = build_kaleidoscope_prompt(clean_material)
                         contents.append(prompt)
+                        use_hist = False
                     else:
                         contents.append(user_text or "Поделись своими мыслями.")
+                        use_hist = True
 
-                thread = Thread(target=process_ai_response, args=(chat_id, message.message_id, message, contents, chat_type))
+                thread = Thread(target=process_ai_response, args=(chat_id, msg.message_id, msg, contents, chat_type, use_hist))
                 thread.start()
                 return '!', 200
             else:
@@ -1273,32 +1301,32 @@ def webhook():
                     return '!', 200
 
                 try:
-                    bot.forward_message(FORWARD_CHAT_ID, chat_id, message.message_id)
+                    bot.forward_message(FORWARD_CHAT_ID, chat_id, msg.message_id)
                 except Exception:
                     try:
-                        bot.copy_message(FORWARD_CHAT_ID, chat_id, message.message_id)
+                        bot.copy_message(FORWARD_CHAT_ID, chat_id, msg.message_id)
                     except Exception as e:
-                        print(f"Ошибка пересылки материала от пользователя: {e}")
+                        print(f"Ошибка пересылки материала: {e}")
 
                 try:
                     bot.send_message(chat_id, "Спасибо! Ваш материал принят на рассмотрение редакции.")
                 except Exception as e:
-                    print(f"Ошибка отправки подтверждения пользователю: {e}")
+                    print(f"Ошибка отправки подтверждения: {e}")
                 return '!', 200
 
         if chat_type in ['group', 'supergroup', 'channel']:
             if chat_id not in ALLOWED_GROUP_IDS:
                 return '!', 200
 
-            is_auto = getattr(message, 'is_automatic_forward', False)
-            from_channel_id, orig_msg_id = get_forward_info(message)
+            is_auto = getattr(msg, 'is_automatic_forward', False)
+            from_channel_id, orig_msg_id = get_forward_info(msg)
             if is_auto and from_channel_id == CHANNEL_ID and chat_id == BREST_TALK_ID:
-                thread = Thread(target=process_channel_forward, args=(chat_id, message, orig_msg_id))
+                thread = Thread(target=process_channel_forward, args=(chat_id, msg, orig_msg_id))
                 thread.start()
                 return '!', 200
 
             if chat_type != 'channel':
-                is_contest = bool(message.photo and "#конкурс" in user_text.lower())
+                is_contest = bool(msg.photo and "#конкурс" in user_text.lower())
 
                 if chat_id == BREST_TALK_ID:
                     if not is_contest:
@@ -1309,10 +1337,10 @@ def webhook():
                     bot_username = f"@{bot_info.username}".lower() if (bot_info and bot_info.username) else ""
 
                     is_reply_to_bot = bool(
-                        message.reply_to_message
-                        and message.reply_to_message.from_user
+                        msg.reply_to_message
+                        and msg.reply_to_message.from_user
                         and bot_id is not None
-                        and message.reply_to_message.from_user.id == bot_id
+                        and msg.reply_to_message.from_user.id == bot_id
                     )
                     is_mentioned = bool(bot_username and bot_username in user_text.lower())
 
@@ -1325,11 +1353,11 @@ def webhook():
                 pass
             
             reply_text = ""
-            if message.reply_to_message:
-                if message.reply_to_message.text:
-                    reply_text = message.reply_to_message.text
-                elif message.reply_to_message.caption:
-                    reply_text = message.reply_to_message.caption
+            if msg.reply_to_message:
+                if msg.reply_to_message.text:
+                    reply_text = msg.reply_to_message.text
+                elif msg.reply_to_message.caption:
+                    reply_text = msg.reply_to_message.caption
             
             if reply_text:
                 user_text = f"[ВНИМАНИЕ: Пользователь отвечает на этот текст: «{reply_text}»]\n{user_text}".strip()
@@ -1340,13 +1368,13 @@ def webhook():
             else:
                 contents.append("Взгляни на это.")
 
-            media_part = extract_media_part(message)
-            if not media_part and message.reply_to_message:
-                media_part = extract_media_part(message.reply_to_message)
+            media_part = extract_media_part(msg)
+            if not media_part and msg.reply_to_message:
+                media_part = extract_media_part(msg.reply_to_message)
             if media_part:
                 contents.append(media_part)
 
-            thread = Thread(target=process_ai_response, args=(chat_id, message.message_id, message, contents, chat_type))
+            thread = Thread(target=process_ai_response, args=(chat_id, msg.message_id, msg, contents, chat_type, True))
             thread.start()
 
     return '!', 200
