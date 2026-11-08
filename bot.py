@@ -1,3 +1,4 @@
+import base64
 import html
 import io
 import json
@@ -315,20 +316,37 @@ def save_used_questions(new_questions):
             print(f"Ошибка сохранения истории вопросов: {e}")
 
 def generate_quiz_image(prompt_text: str) -> bytes | None:
-    if not prompt_text or not isinstance(prompt_text, str):
+    if not prompt_text:
         return None
     try:
-        result = client.models.generate_images(
-            model='imagen-3.0-generate-002',
-            prompt=prompt_text,
-            config=dict(number_of_images=1, aspect_ratio="1:1")
+        response = client.models.generate_content(
+            model='gemini-3.1-flash-image',
+            contents=prompt_text,
+            config=types.GenerateContentConfig(
+                response_modalities=["IMAGE"]
+            )
         )
-        if result and getattr(result, "generated_images", None):
-            img_obj = result.generated_images[0].image
-            if img_obj and getattr(img_obj, "image_bytes", None):
-                return img_obj.image_bytes
+        if not getattr(response, "candidates", None) or not response.candidates[0].content:
+            print(f"[IMAGE ERROR]: Пустой ответ от модели для промпта: {prompt_text}")
+            return None
+
+        parts = getattr(response.candidates[0].content, "parts", None) or []
+        for part in parts:
+            inline_data = getattr(part, 'inline_data', None)
+            if inline_data and getattr(inline_data, 'data', None):
+                raw_data = inline_data.data
+                if isinstance(raw_data, str):
+                    return base64.b64decode(raw_data)
+                elif isinstance(raw_data, (bytes, bytearray)):
+                    # Если байты уже являются валидным JPEG/PNG, возвращаем их напрямую, иначе декодируем из base64
+                    if raw_data.startswith(b'\xff\xd8\xff') or raw_data.startswith(b'\x89PNG'):
+                        return bytes(raw_data)
+                    try:
+                        return base64.b64decode(raw_data)
+                    except Exception:
+                        return bytes(raw_data)
     except Exception as e:
-        print(f"Ошибка генерации изображения Imagen: {e}")
+        print(f"[IMAGE ERROR]: {e}")
     return None
 
 def generate_quiz_questions():
@@ -361,7 +379,7 @@ def generate_quiz_questions():
         f"• Вопрос 11 (УРОВЕНЬ: СУПЕР-ВОПРОС / ФИНАЛ): Финальный супер-вопрос высшей лиги для определения чемпиона.\n\n"
         f"СТРОГОЕ ПРАВИЛО ВИЗУАЛЬНЫХ ЗАГАДОК:\n"
         f"• Вопросы №2, №5 и №8 (нумерация с 1) ОБЯЗАНЫ быть визуальными загадками (метафоры известных фильмов, буквальные визуализации крылатых фраз/идиом, логические арт-загадки). "
-        f"В тексте таких вопросов спрашивай, что зашифровано или показано на картинке (но так, чтобы вопрос оставался решаемым и по смыслу), а в поле \"image_prompt\" дай детальное описание на АНГЛИЙСКОМ языке для генератора изображений Imagen (без текста и надписей на самой картинке).\n"
+        f"В тексте таких вопросов спрашивай, что зашифровано или показано на картинке (но так, чтобы вопрос оставался решаемым и по смыслу), а в поле \"image_prompt\" дай детальное описание на АНГЛИЙСКОМ языке для генератора изображений (без текста и надписей на самой картинке).\n"
         f"• Для всех остальных вопросов (№1, 3, 4, 6, 7, 9, 10, 11) поле \"image_prompt\" СТРОГО должно иметь значение null.\n\n"
         f"ПРАВИЛА ПРОВЕРКИ:\n"
         f"1. Каждый вопрос должен иметь ровно 4 варианта ответа и только ОДИН достоверный правильный ответ (correct_idx от 0 до 3).\n"
@@ -449,9 +467,11 @@ def prefetch_question_image(questions, idx):
         prompt_text = q.get("image_prompt")
         if prompt_text and q.get("image_bytes") is None:
             img_bytes = generate_quiz_image(prompt_text)
-            with quiz_lock:
-                if QUIZ_STATE["is_running"] and 0 <= idx < len(QUIZ_STATE["questions"]):
-                    QUIZ_STATE["questions"][idx]["image_bytes"] = img_bytes
+            if img_bytes:
+                with quiz_lock:
+                    q["image_bytes"] = img_bytes
+                    if QUIZ_STATE["is_running"] and 0 <= idx < len(QUIZ_STATE["questions"]):
+                        QUIZ_STATE["questions"][idx]["image_bytes"] = img_bytes
 
 def run_quiz_game(admin_chat_id, target_chat_id):
     try:
@@ -484,9 +504,11 @@ def run_quiz_game(admin_chat_id, target_chat_id):
             parse_mode="HTML"
         )
 
-        # Во время стартовой 1.5-минутной паузы запускаем фоновый поток генерации для вопроса №2 (индекс 1)
-        if len(questions) > 1 and questions[1].get("image_prompt"):
-            Thread(target=prefetch_question_image, args=(questions, 1), daemon=True).start()
+        # Во время стартовой 1.5-минутной паузы запускаем фоновый поток генерации для первого визуального вопроса
+        for idx_check in range(len(questions)):
+            if questions[idx_check].get("image_prompt"):
+                Thread(target=prefetch_question_image, args=(questions, idx_check), daemon=True).start()
+                break
 
         for _ in range(90):
             with quiz_lock:
@@ -502,6 +524,15 @@ def run_quiz_game(admin_chat_id, target_chat_id):
                 QUIZ_STATE["current_question"] = i
                 QUIZ_STATE["answers"] = {}
                 img_bytes = q.get("image_bytes")
+                img_prompt = q.get("image_prompt")
+
+            # Если у вопроса есть промпт, а картинка ещё не готова — генерируем синхронно перед отправкой
+            if img_prompt and not img_bytes:
+                q["image_bytes"] = generate_quiz_image(img_prompt)
+                img_bytes = q["image_bytes"]
+
+            if img_prompt and not img_bytes:
+                print(f"[QUIZ] Не удалось сгенерировать изображение для вопроса {i}, fallback на текст")
 
             options = q.get("options", [])
             correct_idx = int(q.get("correct_idx", 0))
@@ -535,16 +566,43 @@ def run_quiz_game(admin_chat_id, target_chat_id):
             if img_bytes:
                 try:
                     photo_stream = io.BytesIO(img_bytes)
-                    photo_stream.name = "quiz.jpg"
-                    q_msg = bot.send_photo(
-                        target_chat_id,
-                        photo=photo_stream,
-                        caption=msg_text,
-                        reply_markup=markup,
-                        parse_mode="HTML"
-                    )
+                    photo_stream.name = f"quiz_{i}.jpg"
+                    photo_stream.seek(0)
+
+                    if len(msg_text) <= 1024:
+                        q_msg = bot.send_photo(
+                            target_chat_id,
+                            photo=photo_stream,
+                            caption=msg_text,
+                            reply_markup=markup,
+                            parse_mode="HTML"
+                        )
+                    else:
+                        bot.send_photo(
+                            target_chat_id,
+                            photo=photo_stream,
+                            caption=f"🎨 <b>Иллюстрация к вопросу {i} из {total_q}</b>",
+                            parse_mode="HTML"
+                        )
+                        q_msg = bot.send_message(
+                            target_chat_id,
+                            msg_text,
+                            reply_markup=markup,
+                            parse_mode="HTML"
+                        )
                 except Exception as e:
                     print(f"Ошибка отправки фото-вопроса, фолбэк на текст: {e}")
+                    try:
+                        photo_stream_retry = io.BytesIO(img_bytes)
+                        photo_stream_retry.name = f"quiz_{i}.jpg"
+                        photo_stream_retry.seek(0)
+                        bot.send_photo(
+                            target_chat_id,
+                            photo=photo_stream_retry,
+                            caption=f"🎨 Загадка #{i}"
+                        )
+                    except Exception:
+                        pass
                     q_msg = None
 
             if q_msg is None:
@@ -553,6 +611,12 @@ def run_quiz_game(admin_chat_id, target_chat_id):
                 except Exception as e:
                     print(f"Ошибка отправки вопроса: {e}")
                     continue
+
+            # Предзагрузка следующей картинки на фоне
+            for future_idx in range(i, len(questions)):
+                if questions[future_idx].get("image_prompt") and questions[future_idx].get("image_bytes") is None:
+                    Thread(target=prefetch_question_image, args=(questions, future_idx), daemon=True).start()
+                    break
 
             for _ in range(30):
                 with quiz_lock:
@@ -615,10 +679,6 @@ def run_quiz_game(admin_chat_id, target_chat_id):
                 bot.send_message(target_chat_id, res_text, parse_mode="HTML")
 
             if i < total_q:
-                next_idx = i  # 0-based индекс следующего вопроса (i+1)
-                if next_idx < len(questions) and questions[next_idx].get("image_prompt") and questions[next_idx].get("image_bytes") is None:
-                    Thread(target=prefetch_question_image, args=(questions, next_idx), daemon=True).start()
-
                 for _ in range(90):
                     with quiz_lock:
                         if not QUIZ_STATE["is_running"]:
