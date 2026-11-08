@@ -314,6 +314,23 @@ def save_used_questions(new_questions):
         except Exception as e:
             print(f"Ошибка сохранения истории вопросов: {e}")
 
+def generate_quiz_image(prompt_text: str) -> bytes | None:
+    if not prompt_text or not isinstance(prompt_text, str):
+        return None
+    try:
+        result = client.models.generate_images(
+            model='imagen-3.0-generate-002',
+            prompt=prompt_text,
+            config=dict(number_of_images=1, aspect_ratio="1:1")
+        )
+        if result and getattr(result, "generated_images", None):
+            img_obj = result.generated_images[0].image
+            if img_obj and getattr(img_obj, "image_bytes", None):
+                return img_obj.image_bytes
+    except Exception as e:
+        print(f"Ошибка генерации изображения Imagen: {e}")
+    return None
+
 def generate_quiz_questions():
     used_questions = load_used_questions()
     
@@ -342,6 +359,10 @@ def generate_quiz_questions():
         f"• Вопросы 5–8 (УРОВЕНЬ: СРЕДНЯЯ СЛОЖНОСТЬ): Интересные вопросы на кругозор и смекалку.\n"
         f"• Вопросы 9–10 (УРОВЕНЬ: ХАРДКОР / ЧГК): Редкие, парадоксальные факты для эрудитов.\n"
         f"• Вопрос 11 (УРОВЕНЬ: СУПЕР-ВОПРОС / ФИНАЛ): Финальный супер-вопрос высшей лиги для определения чемпиона.\n\n"
+        f"СТРОГОЕ ПРАВИЛО ВИЗУАЛЬНЫХ ЗАГАДОК:\n"
+        f"• Вопросы №2, №5 и №8 (нумерация с 1) ОБЯЗАНЫ быть визуальными загадками (метафоры известных фильмов, буквальные визуализации крылатых фраз/идиом, логические арт-загадки). "
+        f"В тексте таких вопросов спрашивай, что зашифровано или показано на картинке (но так, чтобы вопрос оставался решаемым и по смыслу), а в поле \"image_prompt\" дай детальное описание на АНГЛИЙСКОМ языке для генератора изображений Imagen (без текста и надписей на самой картинке).\n"
+        f"• Для всех остальных вопросов (№1, 3, 4, 6, 7, 9, 10, 11) поле \"image_prompt\" СТРОГО должно иметь значение null.\n\n"
         f"ПРАВИЛА ПРОВЕРКИ:\n"
         f"1. Каждый вопрос должен иметь ровно 4 варианта ответа и только ОДИН достоверный правильный ответ (correct_idx от 0 до 3).\n"
         f"2. Не делай правильный ответ самым длинным или выделяющимся по стилю.\n"
@@ -349,7 +370,7 @@ def generate_quiz_questions():
         f"{avoid_block}\n"
         f"Ответь СТРОГО валидным JSON-списком из 11 объектов без markdown-разметки:\n"
         f'[\n'
-        f'  {{"question": "Текст вопроса", "options": ["Вариант 1", "Вариант 2", "Вариант 3", "Вариант 4"], "correct_idx": 0, "comment": "Короткий интересный факт к ответу"}}\n'
+        f'  {{"question": "Текст вопроса", "options": ["Вариант 1", "Вариант 2", "Вариант 3", "Вариант 4"], "correct_idx": 0, "comment": "Короткий интересный факт к ответу", "image_prompt": null}}\n'
         f']'
     )
 
@@ -387,6 +408,12 @@ def generate_quiz_questions():
             question_text = item.get("question")
             options = item.get("options")
             correct_idx = item.get("correct_idx")
+            image_prompt = item.get("image_prompt")
+            if isinstance(image_prompt, str):
+                image_prompt = image_prompt.strip() or None
+            else:
+                image_prompt = None
+
             if (
                 isinstance(question_text, str) and question_text.strip()
                 and isinstance(options, list) and len(options) >= 2
@@ -402,7 +429,9 @@ def generate_quiz_questions():
                     "question": question_text.strip(),
                     "options": clean_options,
                     "correct_idx": new_correct_idx,
-                    "comment": str(item.get("comment", "")).strip()
+                    "comment": str(item.get("comment", "")).strip(),
+                    "image_prompt": image_prompt,
+                    "image_bytes": None
                 })
 
         valid_questions = valid_questions[:11]
@@ -413,6 +442,16 @@ def generate_quiz_questions():
     except Exception as e:
         print(f"Ошибка генерации вопросов квиза: {e}")
         return []
+
+def prefetch_question_image(questions, idx):
+    if 0 <= idx < len(questions):
+        q = questions[idx]
+        prompt_text = q.get("image_prompt")
+        if prompt_text and q.get("image_bytes") is None:
+            img_bytes = generate_quiz_image(prompt_text)
+            with quiz_lock:
+                if QUIZ_STATE["is_running"] and 0 <= idx < len(QUIZ_STATE["questions"]):
+                    QUIZ_STATE["questions"][idx]["image_bytes"] = img_bytes
 
 def run_quiz_game(admin_chat_id, target_chat_id):
     try:
@@ -444,6 +483,11 @@ def run_quiz_game(admin_chat_id, target_chat_id):
             "⏳ <i>Вопрос появится через 1,5 минуты. Готовьтесь!</i>",
             parse_mode="HTML"
         )
+
+        # Во время стартовой 1.5-минутной паузы запускаем фоновый поток генерации для вопроса №2 (индекс 1)
+        if len(questions) > 1 and questions[1].get("image_prompt"):
+            Thread(target=prefetch_question_image, args=(questions, 1), daemon=True).start()
+
         for _ in range(90):
             with quiz_lock:
                 if not QUIZ_STATE["is_running"]:
@@ -457,6 +501,7 @@ def run_quiz_game(admin_chat_id, target_chat_id):
                     break
                 QUIZ_STATE["current_question"] = i
                 QUIZ_STATE["answers"] = {}
+                img_bytes = q.get("image_bytes")
 
             options = q.get("options", [])
             correct_idx = int(q.get("correct_idx", 0))
@@ -485,11 +530,29 @@ def run_quiz_game(admin_chat_id, target_chat_id):
                 f"━━━━━━━━━━━━━━\n"
                 f"<blockquote><b>{safe_q_text}</b></blockquote>"
             )
-            try:
-                q_msg = bot.send_message(target_chat_id, msg_text, reply_markup=markup, parse_mode="HTML")
-            except Exception as e:
-                print(f"Ошибка отправки вопроса: {e}")
-                continue
+
+            q_msg = None
+            if img_bytes:
+                try:
+                    photo_stream = io.BytesIO(img_bytes)
+                    photo_stream.name = "quiz.jpg"
+                    q_msg = bot.send_photo(
+                        target_chat_id,
+                        photo=photo_stream,
+                        caption=msg_text,
+                        reply_markup=markup,
+                        parse_mode="HTML"
+                    )
+                except Exception as e:
+                    print(f"Ошибка отправки фото-вопроса, фолбэк на текст: {e}")
+                    q_msg = None
+
+            if q_msg is None:
+                try:
+                    q_msg = bot.send_message(target_chat_id, msg_text, reply_markup=markup, parse_mode="HTML")
+                except Exception as e:
+                    print(f"Ошибка отправки вопроса: {e}")
+                    continue
 
             for _ in range(30):
                 with quiz_lock:
@@ -552,6 +615,10 @@ def run_quiz_game(admin_chat_id, target_chat_id):
                 bot.send_message(target_chat_id, res_text, parse_mode="HTML")
 
             if i < total_q:
+                next_idx = i  # 0-based индекс следующего вопроса (i+1)
+                if next_idx < len(questions) and questions[next_idx].get("image_prompt") and questions[next_idx].get("image_bytes") is None:
+                    Thread(target=prefetch_question_image, args=(questions, next_idx), daemon=True).start()
+
                 for _ in range(90):
                     with quiz_lock:
                         if not QUIZ_STATE["is_running"]:
@@ -569,25 +636,36 @@ def run_quiz_game(admin_chat_id, target_chat_id):
                 key=lambda x: (-x.get("points", 0), x.get("last_time", float("inf")))
             )
 
-            perfect_target = total_q if total_q > 0 else 11
+            perfect_target_questions = total_q if total_q > 0 else 11
+            max_possible_points = perfect_target_questions * 10  # 11 вопросов по 10 баллов = 110 баллов
+
+            # Супер-приз выдается ТОЛЬКО тем, кто реально набрал максимальные 110 баллов (11 из 11)
             perfect_players = [
-                info["name"]
-                for info in correct_counts_snapshot.values()
-                if info.get("count", 0) >= perfect_target
+                p["name"]
+                for p in sorted_scores
+                if p.get("points", 0) >= max_possible_points
             ]
 
             if perfect_players:
-                perfect_names_str = ", ".join(f"<b>{html.escape(name)}</b>" for name in perfect_players)
-                super_prize_block = (
-                    f"🎬 <b>СУПЕР-ПРИЗ ({perfect_target} из {perfect_target} правильных ответов!):</b>\n"
-                    f"🌟 Безупречный результат без единой ошибки показали: {perfect_names_str}!\n"
-                    f"Главный супер-приз — <b>4 билета в кино</b> 🎬🎟️ достаётся им!\n\n"
-                )
+                if len(perfect_players) == 1:
+                    perfect_name = f"<b>{html.escape(perfect_players[0])}</b>"
+                    super_prize_block = (
+                        f"🎬 <b>СУПЕР-ПРИЗ ({perfect_target_questions} из {perfect_target_questions} правильных ответов!):</b>\n"
+                        f"🌟 Безупречный результат в {max_possible_points} баллов без единой ошибки показал(а): {perfect_name}!\n"
+                        f"Главный супер-приз — <b>4 билета в кино</b> 🎬🎟️ достаётся триумфатору!\n\n"
+                    )
+                else:
+                    perfect_names_str = ", ".join(f"<b>{html.escape(name)}</b>" for name in perfect_players)
+                    super_prize_block = (
+                        f"🎬 <b>СУПЕР-ПРИЗ ({perfect_target_questions} из {perfect_target_questions} правильных ответов!):</b>\n"
+                        f"🌟 Безупречный результат в {max_possible_points} баллов без единой ошибки показали: {perfect_names_str}!\n"
+                        f"Главный супер-приз — <b>4 билета в кино</b> 🎬🎟️ достаётся им!\n\n"
+                    )
             else:
                 super_prize_block = (
-                    f"🎬 <b>Супер-приз ({perfect_target} из {perfect_target} без ошибок):</b>\n"
-                    f"В этот раз никто не смог ответить правильно на все {perfect_target} вопросов подряд — "
-                    f"<b>4 билета в кино</b> 🎬🎟️ остаются неразыгранными!\n\n"
+                    f"🎬 <b>Супер-приз ({perfect_target_questions} из {perfect_target_questions} без ошибок / {max_possible_points} баллов):</b>\n"
+                    f"В этот раз никто не смог набрать максимум в {max_possible_points} баллов — "
+                    f"<b>4 билета в кино</b> 🎬🎟️ остаются в банке викторины до следующей игры!\n\n"
                 )
 
             medals = {1: "🥇", 2: "🥈", 3: "🥉"}
@@ -645,11 +723,11 @@ def run_quiz_game(admin_chat_id, target_chat_id):
                     for idx, p in enumerate(sorted_scores, start=1)
                 ]
                 accuracy_lines = [
-                    f"- {info['name']}: {info['count']} из {perfect_target} правильных ответов"
-                    for info in sorted(correct_counts_snapshot.values(), key=lambda x: -x.get("count", 0))
+                    f"- {p['name']}: {p['points'] // 10} из {perfect_target_questions} взятых вопросов ({p['points']} баллов)"
+                    for p in sorted_scores
                 ]
                 raw_game_data = (
-                    f"Всего вопросов: {perfect_target}\n"
+                    f"Всего вопросов: {perfect_target_questions}\n"
                     f"Табло по очкам:\n" + ("\n".join(stats_lines) if stats_lines else "Нет игроков с очками") + "\n\n"
                     f"Точность ответов:\n" + ("\n".join(accuracy_lines) if accuracy_lines else "Нет правильных ответов") + "\n\n"
                     f"Обладатели супер-приза: {', '.join(perfect_players) if perfect_players else 'нет'}"
@@ -1069,7 +1147,7 @@ def webhook():
                     print(f"Ошибка ответа на callback_query: {e}")
             return '!', 200
 
-    msg = update.message or update.channel_post
+    msg = update.message
     if msg:
         chat_id = msg.chat.id
         chat_type = msg.chat.type
