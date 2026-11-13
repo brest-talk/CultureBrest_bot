@@ -1682,7 +1682,7 @@ def webhook():
         print(f"Ошибка разбора Update: {e}")
         return '!', 200
 
-    # Обработка вступлений и выходов участников в чате BREST_TALK_ID
+    # Обработка вступлений и выходов участников в чате BREST_TALK_ID (включая ранний старт)
     if getattr(update, "chat_member", None):
         cm = update.chat_member
         if cm.chat and cm.chat.id == BREST_TALK_ID:
@@ -2151,104 +2151,103 @@ def webhook():
 
         if chat_type == 'private':
             raw_stripped = user_text.strip().lower()
-            is_ref_request = (
-                cmd_clean == '/ref'
-                or (cmd_clean == '/start' and user_id != ADMIN_ID)
-                or (raw_stripped.startswith('/start') and 'ref' in raw_stripped.split())
-            )
-            if is_ref_request and msg.from_user:
+
+            if user_id != ADMIN_ID:
+                if cmd_clean in ('/start', '/ref') and msg.from_user:
+                    send_or_edit_ref_cabinet(chat_id, msg.from_user)
+                return '!', 200
+
+            # Ветка для ADMIN_ID в личных сообщениях
+            if (cmd_clean == '/ref' or (cmd_clean == '/start' and 'ref' in raw_stripped.split())) and msg.from_user:
                 send_or_edit_ref_cabinet(chat_id, msg.from_user)
                 return '!', 200
 
-            if user_id == ADMIN_ID:
-                if msg.text == '/start':
-                    bot.send_message(chat_id, "Приветствую, шеф.")
-                    return '!', 200
+            if cmd_clean == '/start':
+                bot.send_message(chat_id, "Приветствую, шеф. (Для открытия реферального кабинета используйте /ref)")
+                return '!', 200
 
-                if msg.photo and getattr(msg, 'media_group_id', None):
-                    mg_id = str(msg.media_group_id)
-                    with media_group_lock:
-                        if mg_id not in MEDIA_GROUPS:
-                            MEDIA_GROUPS[mg_id] = {
-                                "messages": [],
-                                "caption": "",
-                                "chat_id": chat_id,
-                                "timer": None
-                            }
-                        MEDIA_GROUPS[mg_id]["messages"].append(msg)
-                        if msg.caption:
-                            MEDIA_GROUPS[mg_id]["caption"] = msg.caption
-                        if MEDIA_GROUPS[mg_id]["timer"]:
-                            MEDIA_GROUPS[mg_id]["timer"].cancel()
-                        timer = Timer(4.0, flush_media_group, args=[mg_id])
-                        MEDIA_GROUPS[mg_id]["timer"] = timer
-                        timer.start()
-                    return '!', 200
+            if msg.photo and getattr(msg, 'media_group_id', None):
+                mg_id = str(msg.media_group_id)
+                with media_group_lock:
+                    if mg_id not in MEDIA_GROUPS:
+                        MEDIA_GROUPS[mg_id] = {
+                            "messages": [],
+                            "caption": "",
+                            "chat_id": chat_id,
+                            "timer": None
+                        }
+                    MEDIA_GROUPS[mg_id]["messages"].append(msg)
+                    if msg.caption:
+                        MEDIA_GROUPS[mg_id]["caption"] = msg.caption
+                    if MEDIA_GROUPS[mg_id]["timer"]:
+                        MEDIA_GROUPS[mg_id]["timer"].cancel()
+                    timer = Timer(4.0, flush_media_group, args=[mg_id])
+                    MEDIA_GROUPS[mg_id]["timer"] = timer
+                    timer.start()
+                return '!', 200
 
-                try:
-                    bot.send_chat_action(chat_id, 'typing')
-                except Exception:
-                    pass
+            try:
+                bot.send_chat_action(chat_id, 'typing')
+            except Exception:
+                pass
 
-                media_part = extract_media_part(msg)
-                if not media_part and msg.reply_to_message:
-                    media_part = extract_media_part(msg.reply_to_message)
+            media_part = extract_media_part(msg)
+            if not media_part and msg.reply_to_message:
+                media_part = extract_media_part(msg.reply_to_message)
 
-                reply_text = ""
-                if msg.reply_to_message:
-                    reply_text = msg.reply_to_message.text or msg.reply_to_message.caption or ""
+            reply_text = ""
+            if msg.reply_to_message:
+                reply_text = msg.reply_to_message.text or msg.reply_to_message.caption or ""
 
-                contents = []
-                user_text_lower = user_text.lower()
-                reply_text_lower = reply_text.lower()
+            contents = []
+            user_text_lower = user_text.lower()
+            reply_text_lower = reply_text.lower()
 
-                is_mafia_cmd = (
-                    ("#мафия" in user_text_lower)
-                    or ("мафия" in user_text_lower)
-                    or ("#мафия" in reply_text_lower)
-                    or ("мафия" in reply_text_lower)
-                )
-                is_kaleidoscope_cmd = any(
-                    word in user_text_lower or word in reply_text_lower
-                    for word in ["калейдоскоп", "оформи"]
-                )
+            is_mafia_cmd = (
+                ("#мафия" in user_text_lower)
+                or ("мафия" in user_text_lower)
+                or ("#мафия" in reply_text_lower)
+                or ("мафия" in reply_text_lower)
+            )
+            is_kaleidoscope_cmd = any(
+                word in user_text_lower or word in reply_text_lower
+                for word in ["калейдоскоп", "оформи"]
+            )
 
-                if media_part:
-                    if is_mafia_cmd:
-                        combined_comment = clean_cmd_prefix(f"{user_text}\n{reply_text}".strip())
-                        prompt = build_mafia_chronicle_prompt(combined_comment)
-                        contents = [prompt, media_part]
-                        use_hist = False
-                    elif is_kaleidoscope_cmd:
-                        clean_comment = clean_cmd_prefix(user_text)
-                        prompt = build_kaleidoscope_prompt("Материал из прикрепленного файла/изображения.", clean_comment)
-                        contents = [prompt, media_part]
-                        use_hist = False
-                    else:
-                        prompt = "Изучи этот материал. Транскрибируй его смысловое наполнение и перепиши от своего лица."
-                        contents = [prompt, media_part]
-                        use_hist = True
+            if media_part:
+                if is_mafia_cmd:
+                    combined_comment = clean_cmd_prefix(f"{user_text}\n{reply_text}".strip())
+                    prompt = build_mafia_chronicle_prompt(combined_comment)
+                    contents = [prompt, media_part]
+                    use_hist = False
+                elif is_kaleidoscope_cmd:
+                    clean_comment = clean_cmd_prefix(user_text)
+                    prompt = build_kaleidoscope_prompt("Материал из прикрепленного файла/изображения.", clean_comment)
+                    contents = [prompt, media_part]
+                    use_hist = False
                 else:
-                    if is_mafia_cmd:
-                        raw_text = f"{reply_text}\n{user_text}".strip() if reply_text else user_text
-                        prompt = build_mafia_chronicle_prompt(clean_cmd_prefix(raw_text))
-                        contents.append(prompt)
-                        use_hist = False
-                    elif is_kaleidoscope_cmd:
-                        raw_text = reply_text if reply_text else user_text
-                        clean_material = clean_cmd_prefix(raw_text)
-                        prompt = build_kaleidoscope_prompt(clean_material)
-                        contents.append(prompt)
-                        use_hist = False
-                    else:
-                        contents.append(user_text or "Поделись своими мыслями.")
-                        use_hist = True
-
-                thread = Thread(target=process_ai_response, args=(chat_id, msg.message_id, msg, contents, chat_type, use_hist))
-                thread.start()
-                return '!', 200
+                    prompt = "Изучи этот материал. Транскрибируй его смысловое наполнение и перепиши от своего лица."
+                    contents = [prompt, media_part]
+                    use_hist = True
             else:
-                return '!', 200
+                if is_mafia_cmd:
+                    raw_text = f"{reply_text}\n{user_text}".strip() if reply_text else user_text
+                    prompt = build_mafia_chronicle_prompt(clean_cmd_prefix(raw_text))
+                    contents.append(prompt)
+                    use_hist = False
+                elif is_kaleidoscope_cmd:
+                    raw_text = reply_text if reply_text else user_text
+                    clean_material = clean_cmd_prefix(raw_text)
+                    prompt = build_kaleidoscope_prompt(clean_material)
+                    contents.append(prompt)
+                    use_hist = False
+                else:
+                    contents.append(user_text or "Поделись своими мыслями.")
+                    use_hist = True
+
+            thread = Thread(target=process_ai_response, args=(chat_id, msg.message_id, msg, contents, chat_type, use_hist))
+            thread.start()
+            return '!', 200
 
         if chat_type in ['group', 'supergroup', 'channel']:
             if chat_id not in ALLOWED_GROUP_IDS:
@@ -2324,4 +2323,11 @@ if __name__ == "__main__":
             url=f"{render_url}/{TOKEN}",
             allowed_updates=["message", "callback_query", "chat_member"]
         )
+    try:
+        bot.set_my_commands([
+            telebot.types.BotCommand("/start", "🎁 Получить ссылку для розыгрыша Mi Band 11"),
+            telebot.types.BotCommand("/ref", "🔗 Моя реферальная ссылка и билеты"),
+        ])
+    except Exception as e:
+        print(f"Ошибка установки команд: {e}")
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)), threaded=True)
