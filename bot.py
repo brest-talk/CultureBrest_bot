@@ -5,7 +5,9 @@ import json
 import os
 import random
 import re
+import shutil
 import time
+import urllib.parse
 from datetime import datetime, timezone, timedelta
 from threading import Thread, Lock, RLock, Timer
 from flask import Flask, request
@@ -34,6 +36,8 @@ if not os.path.exists(DATA_DIR):
     except Exception:
         DATA_DIR = "."
 
+REFS_FILE = os.path.join(DATA_DIR, "giveaway_refs.json")
+
 bot = telebot.TeleBot(TOKEN)
 client = genai.Client(api_key=GEMINI_API_KEY)
 app = Flask(__name__)
@@ -41,6 +45,7 @@ history_lock = Lock()
 quiz_lock = RLock()
 lobby_lock = Lock()
 media_group_lock = Lock()
+refs_lock = RLock()
 
 MEDIA_GROUPS = {}  # {media_group_id: {"messages": [msg], "caption": str, "chat_id": int, "timer": Timer}}
 
@@ -55,6 +60,15 @@ def get_bot_info():
             print(f"Ошибка получения данных бота: {e}")
             return None
     return _BOT_INFO
+
+def format_user_display_name(user):
+    if not user:
+        return "Участник"
+    first_name = (getattr(user, "first_name", "") or "").strip()
+    last_name = (getattr(user, "last_name", "") or "").strip()
+    full_name = f"{first_name} {last_name}".strip() or "Участник"
+    username = getattr(user, "username", None)
+    return f"{full_name} (@{username})" if username else full_name
 
 QUIZ_STATE = {
     "is_running": False,
@@ -200,7 +214,581 @@ def atomic_save_json(filepath, data):
     tmp_path = filepath + ".tmp"
     with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    if os.path.exists(filepath):
+        try:
+            if os.path.getsize(filepath) > 0:
+                shutil.copy2(filepath, filepath + ".bak")
+        except Exception as e:
+            print(f"Ошибка создания резервной копии .bak для {filepath}: {e}")
     os.replace(tmp_path, filepath)
+
+def _normalize_refs_data(raw_data):
+    if not isinstance(raw_data, dict):
+        return {"users": {}, "links": {}}
+    users_raw = raw_data.get("users")
+    links_raw = raw_data.get("links")
+    norm_users = {}
+    norm_links = {}
+
+    if isinstance(users_raw, dict):
+        for uid, uinfo in users_raw.items():
+            if not isinstance(uinfo, dict):
+                continue
+            uid_str = str(uid)
+            raw_refs = uinfo.get("referrals", [])
+            dedup_refs = []
+            if isinstance(raw_refs, list):
+                for r in raw_refs:
+                    r_str = str(r)
+                    if r_str and r_str not in dedup_refs:
+                        dedup_refs.append(r_str)
+            invite_link = uinfo.get("invite_link") or ""
+            norm_users[uid_str] = {
+                "name": str(uinfo.get("name") or "Участник"),
+                "invite_link": str(invite_link),
+                "referrals": dedup_refs,
+                "active": bool(uinfo.get("active", False))
+            }
+            if invite_link:
+                norm_links[str(invite_link)] = uid_str
+
+    if isinstance(links_raw, dict):
+        for link_str, creator_id in links_raw.items():
+            if link_str and creator_id is not None:
+                norm_links[str(link_str)] = str(creator_id)
+
+    return {"users": norm_users, "links": norm_links}
+
+def load_refs_data():
+    with refs_lock:
+        if os.path.exists(REFS_FILE):
+            try:
+                with open(REFS_FILE, "r", encoding="utf-8") as f:
+                    raw = json.load(f)
+                return _normalize_refs_data(raw)
+            except (json.JSONDecodeError, OSError) as e:
+                print(f"[REFS WARNING] Основной файл {REFS_FILE} поврежден ({e}). Чтение из резервной копии .bak...")
+                bak_file = REFS_FILE + ".bak"
+                if os.path.exists(bak_file):
+                    try:
+                        with open(bak_file, "r", encoding="utf-8") as bf:
+                            raw_bak = json.load(bf)
+                        restored = _normalize_refs_data(raw_bak)
+                        try:
+                            atomic_save_json(REFS_FILE, restored)
+                        except Exception:
+                            pass
+                        return restored
+                    except Exception as bak_err:
+                        print(f"[REFS ERROR] Не удалось прочитать резервную копию {bak_file}: {bak_err}")
+        return {"users": {}, "links": {}}
+
+def save_refs_data(data):
+    with refs_lock:
+        normalized = _normalize_refs_data(data)
+        try:
+            atomic_save_json(REFS_FILE, normalized)
+        except Exception as e:
+            print(f"[REFS ERROR] Ошибка сохранения базы рефералов: {e}")
+
+def mark_user_active_in_brest_talk(user):
+    if not user or getattr(user, "is_bot", False):
+        return
+    uid_str = str(user.id)
+    uname = format_user_display_name(user)
+    with refs_lock:
+        data = load_refs_data()
+        users = data["users"]
+        if uid_str not in users:
+            users[uid_str] = {
+                "name": uname,
+                "invite_link": "",
+                "referrals": [],
+                "active": True
+            }
+            save_refs_data(data)
+        else:
+            changed = False
+            if not users[uid_str].get("active"):
+                users[uid_str]["active"] = True
+                changed = True
+            if uname and users[uid_str].get("name") != uname:
+                users[uid_str]["name"] = uname
+                changed = True
+            if changed:
+                save_refs_data(data)
+
+def build_ref_cabinet_payload(user):
+    uid_str = str(user.id)
+    uname = format_user_display_name(user)
+
+    with refs_lock:
+        data = load_refs_data()
+        if uid_str not in data["users"]:
+            data["users"][uid_str] = {
+                "name": uname,
+                "invite_link": "",
+                "referrals": [],
+                "active": False
+            }
+        else:
+            if uname:
+                data["users"][uid_str]["name"] = uname
+
+        user_data = data["users"][uid_str]
+        invite_link = user_data.get("invite_link", "")
+
+        if not invite_link:
+            try:
+                invite = bot.create_chat_invite_link(
+                    chat_id=BREST_TALK_ID,
+                    name=f"Ref_{uid_str}"
+                )
+                invite_link = invite.invite_link
+                user_data["invite_link"] = invite_link
+                data["links"][invite_link] = uid_str
+            except Exception as e:
+                print(f"[REFS ERROR] Ошибка создания invite_link для {uid_str}: {e}")
+
+        # Живая проверка рефералов ТОЛЬКО этого конкретного пользователя
+        valid_refs = []
+        refs_changed = False
+        for r_id in list(user_data.get("referrals", [])):
+            try:
+                cm = bot.get_chat_member(BREST_TALK_ID, int(r_id))
+                if cm.status in ['member', 'administrator', 'creator', 'restricted']:
+                    if str(r_id) not in valid_refs:
+                        valid_refs.append(str(r_id))
+                else:
+                    refs_changed = True
+            except Exception as e:
+                err_lower = str(e).lower()
+                if any(phrase in err_lower for phrase in ("user not found", "chat not found", "participant_id_invalid", "user_id_invalid")):
+                    refs_changed = True
+                else:
+                    # При временном сетевом сбое сохраняем реферала
+                    if str(r_id) not in valid_refs:
+                        valid_refs.append(str(r_id))
+
+        if refs_changed or len(valid_refs) != len(user_data.get("referrals", [])):
+            user_data["referrals"] = valid_refs
+
+        save_refs_data(data)
+        count = len(user_data.get("referrals", []))
+        is_active = bool(user_data.get("active", False))
+
+    link_display = invite_link if invite_link else "Не удалось создать ссылку (проверьте права администратора у бота в Brest_TALK)"
+    activity_status = "✅ Выполнено" if is_active else "❌ Напишите хотя бы 1 сообщение в чате Brest_TALK"
+    qualified_status = "✅ Вы в игре!" if (count >= 3 and is_active) else "⏳ Выполните все условия выше"
+
+    text = (
+        f"🔥 <b>МЕГА-РОЗЫГРЫШ 2 ФИТНЕС-БРАСЛЕТОВ MI BAND 11!</b> 🎁⌚️\n\n"
+        f"📅 <b>Сроки проведения:</b> с 16 по 30 ноября.\n"
+        f"Для попадания в барабан нужно минимум <b>3 приглашенных друга</b> (3 билета). "
+        f"Хотите увеличить шансы выигрыша — приглашайте больше друзей и получайте больше билетов! "
+        f"Приглашенные участники должны оставаться в чате на момент розыгрыша, а вам нужно написать хотя бы 1 комментарий в чате.\n\n"
+        f"🔗 <b>Ваша персональная ссылка для приглашения друзей:</b>\n"
+        f"<code>{html.escape(link_display)}</code>\n\n"
+        f"📊 <b>Ваш статус участника:</b>\n"
+        f"🎟 <b>Ваши билеты:</b> {count} (Минимум для входа: 3)\n"
+        f"💬 <b>Активность в чате (мин. 1 сообщение):</b> {activity_status}\n"
+        f"🎯 <b>Статус допуска в барабан:</b> {qualified_status}"
+    )
+
+    markup = telebot.types.InlineKeyboardMarkup(row_width=1)
+    if invite_link:
+        share_text = "Залетай в живой чат Бреста Brest_TALK! Тут уютно, игры по вечерам и розыгрыш двух Mi Band 11 🔥"
+        share_url = (
+            f"https://t.me/share/url?url={urllib.parse.quote(invite_link)}"
+            f"&text={urllib.parse.quote(share_text)}"
+        )
+        markup.add(
+            telebot.types.InlineKeyboardButton(
+                text="📤 Поделиться ссылкой с друзьями",
+                url=share_url
+            )
+        )
+    markup.add(
+        telebot.types.InlineKeyboardButton(
+            text="🔄 Обновить мою статистику",
+            callback_data="refresh_ref_stats"
+        )
+    )
+    return text, markup
+
+def send_or_edit_ref_cabinet(chat_id, user, edit_msg_id=None, callback_query_id=None):
+    text, markup = build_ref_cabinet_payload(user)
+    if edit_msg_id is not None:
+        try:
+            bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=edit_msg_id,
+                text=text,
+                reply_markup=markup,
+                parse_mode="HTML",
+                disable_web_page_preview=True
+            )
+            if callback_query_id:
+                bot.answer_callback_query(callback_query_id, "✅ Статистика обновлена!", show_alert=False)
+            return
+        except Exception as e:
+            if "message is not modified" in str(e).lower():
+                if callback_query_id:
+                    try:
+                        bot.answer_callback_query(callback_query_id, "Актуальные данные уже на экране 👌", show_alert=False)
+                    except Exception:
+                        pass
+                return
+            print(f"Ошибка редактирования карточки рефералов: {e}")
+
+    try:
+        bot.send_message(
+            chat_id,
+            text,
+            reply_markup=markup,
+            parse_mode="HTML",
+            disable_web_page_preview=True
+        )
+    except Exception as e:
+        print(f"Ошибка отправки карточки рефералов: {e}")
+
+def verify_and_build_giveaway_pool():
+    """
+    Проверяет ВСЕ условия в реальном времени через Telegram API:
+    1. Участник сам состоит в чате BREST_TALK_ID.
+    2. Участник проявил активность (active == True).
+    3. Каждый приглашенный друг реально находится в чате BREST_TALK_ID на момент проверки.
+    4. Число живых рефералов >= 3.
+    Возвращает кортеж: (qualified_list, all_stats_list)
+    """
+    with refs_lock:
+        data = load_refs_data()
+        users = data.get("users", {})
+        qualified = []
+        all_stats = []
+        db_modified = False
+
+        for uid_str, uinfo in users.items():
+            name = uinfo.get("name") or f"ID {uid_str}"
+            is_active = bool(uinfo.get("active", False))
+            raw_refs = list(uinfo.get("referrals", []))
+
+            # 1. Проверяем присутствие самого участника в чате
+            in_chat = False
+            try:
+                member = bot.get_chat_member(BREST_TALK_ID, int(uid_str))
+                if member.status in ['member', 'administrator', 'creator', 'restricted']:
+                    in_chat = True
+            except Exception as e:
+                print(f"[VERIFY] Не удалось проверить участника {uid_str}: {e}")
+                in_chat = False
+
+            # 2. Живая проверка каждого приглашенного друга в чате
+            alive_refs = []
+            for ref_id in raw_refs:
+                try:
+                    ref_member = bot.get_chat_member(BREST_TALK_ID, int(ref_id))
+                    if ref_member.status in ['member', 'administrator', 'creator', 'restricted']:
+                        if str(ref_id) not in alive_refs:
+                            alive_refs.append(str(ref_id))
+                    else:
+                        db_modified = True
+                except Exception as e:
+                    err_lower = str(e).lower()
+                    if any(phrase in err_lower for phrase in ("user not found", "chat not found", "participant_id_invalid", "user_id_invalid")):
+                        print(f"[VERIFY] Реферал {ref_id} не найден ({e}), удаляем из базы.")
+                        db_modified = True
+                    else:
+                        print(f"[VERIFY] Временная ошибка сети при проверке {ref_id} ({e}), сохраняем.")
+                        if str(ref_id) not in alive_refs:
+                            alive_refs.append(str(ref_id))
+
+            if len(alive_refs) != len(raw_refs):
+                uinfo["referrals"] = alive_refs
+                db_modified = True
+
+            tickets_count = len(alive_refs)
+            is_qualified = in_chat and is_active and (tickets_count >= 3)
+
+            entry = {
+                "user_id": str(uid_str),
+                "name": name,
+                "tickets": tickets_count,
+                "active": is_active,
+                "in_chat": in_chat,
+                "qualified": is_qualified
+            }
+            all_stats.append(entry)
+            if is_qualified:
+                qualified.append(entry)
+
+        if db_modified:
+            save_refs_data(data)
+
+    qualified.sort(key=lambda x: (-x["tickets"], x["name"]))
+    all_stats.sort(key=lambda x: (-int(x["qualified"]), -x["tickets"], x["name"]))
+    return qualified, all_stats
+
+def process_ref_top_async(chat_id, status_msg_id):
+    try:
+        qualified, all_stats = verify_and_build_giveaway_pool()
+        if not all_stats:
+            empty_text = (
+                "📊 <b>Таблица участников розыгрыша Mi Band 11 пуста.</b>\n"
+                "Пока никто не создал реферальную ссылку."
+            )
+            bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=status_msg_id,
+                text=empty_text,
+                parse_mode="HTML"
+            )
+            return
+
+        lines = []
+        for idx, item in enumerate(all_stats[:30], start=1):
+            act_icon = "💬✅" if item["active"] else "💬❌"
+            qual_icon = "🎯 Допущен" if item["qualified"] else "⏳ Не допущен"
+            lines.append(
+                f"{idx}. <b>{html.escape(item['name'])}</b> — 🎟 <b>{item['tickets']}</b> бил. | {act_icon} | {qual_icon}"
+            )
+
+        total_qual_tickets = sum(p["tickets"] for p in qualified)
+        stats_text = (
+            f"🏆 <b>Рейтинг участников розыгрыша Mi Band 11 (проверено в реальном времени):</b>\n\n"
+            + "\n".join(lines)
+            + f"\n\n✅ <b>Квалифицировано в барабан:</b> {len(qualified)} чел. (Всего билетов: <b>{total_qual_tickets}</b>)"
+        )
+        bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=status_msg_id,
+            text=stats_text,
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        print(f"Ошибка в фоновом потоке process_ref_top_async: {e}")
+
+def process_start_giveaway_async(chat_id, status_msg_id):
+    try:
+        qualified, _ = verify_and_build_giveaway_pool()
+        total_tickets = sum(p["tickets"] for p in qualified)
+
+        if not qualified:
+            no_qual_text = (
+                "⚠️ <b>Проверка завершена:</b> На данный момент нет ни одного участника, "
+                "выполнившего все условия (минимум 3 живых реферала в чате + минимум 1 сообщение в чате)."
+            )
+            bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=status_msg_id,
+                text=no_qual_text,
+                parse_mode="HTML"
+            )
+            return
+
+        part_lines = [
+            f"• <b>{html.escape(p['name'])}</b> — 🎟 <b>{p['tickets']}</b> билет(ов)"
+            for p in qualified
+        ]
+        preview_text = (
+            f"🔥 <b>ФИНАЛ МЕГА-РОЗЫГРЫША 2 ФИТНЕС-БРАСЛЕТОВ XIAOMI MI BAND 11!</b> 🎁⌚️\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"✅ <b>Все условия проверены в реальном времени!</b>\n"
+            f"Участники в чате, активность подтверждена, присутствие каждого приглашенного друга проверено.\n\n"
+            f"👥 <b>Допущенные участники в барабане ({len(qualified)}):</b>\n"
+            + "\n".join(part_lines)
+            + f"\n━━━━━━━━━━━━━━\n"
+            f"🎟 <b>Всего билетов в барабане:</b> {total_tickets}\n"
+            f"🏆 <b>Призовой фонд:</b> 2 x Xiaomi Mi Band 11\n\n"
+            f"👇 <i>Нажмите кнопку ниже для запуска барабана в прямом эфире!</i>"
+        )
+        markup = telebot.types.InlineKeyboardMarkup()
+        markup.add(
+            telebot.types.InlineKeyboardButton(
+                text="🚀 КРУТИТЬ БАРАБАН (В ПРЯМОМ ЭФИРЕ)",
+                callback_data="run_live_drum"
+            )
+        )
+        bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=status_msg_id,
+            text=preview_text,
+            reply_markup=markup,
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        print(f"Ошибка в фоновом потоке process_start_giveaway_async: {e}")
+
+def run_drum_animation_thread(chat_id, message_id, participants, is_test=False):
+    try:
+        try:
+            bot.edit_message_reply_markup(chat_id, message_id, reply_markup=None)
+        except Exception:
+            pass
+
+        if not participants:
+            bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text="❌ <b>Нет квалифицированных участников для запуска барабана.</b>",
+                parse_mode="HTML"
+            )
+            return
+
+        # Формируем пул билетов из кортежей (user_id, name, tickets)
+        ticket_pool = []
+        for idx, p in enumerate(participants):
+            p_uid = str(p.get("user_id") or f"uid_{idx}")
+            p_name = str(p.get("name") or "Участник")
+            p_tickets = int(p.get("tickets", 0))
+            for _ in range(p_tickets):
+                ticket_pool.append((p_uid, p_name, p_tickets))
+
+        random.shuffle(ticket_pool)
+        total_tickets = len(ticket_pool)
+
+        if total_tickets == 0:
+            return
+
+        delays = [1.3, 1.5, 1.7, 2.0, 2.3, 2.6, 3.0]
+        mode_prefix = "🧪 <b>[ТЕСТОВЫЙ РЕЖИМ]</b>\n" if is_test else ""
+
+        # РАУНД 1: Приз #1 — первый Mi Band 11
+        for step_idx, delay in enumerate(delays):
+            time.sleep(delay)
+            above = html.escape(random.choice(ticket_pool)[1])
+            current = html.escape(random.choice(ticket_pool)[1])
+            below = html.escape(random.choice(ticket_pool)[1])
+            spin_dots = "." * ((step_idx % 3) + 1)
+
+            frame_text = (
+                f"{mode_prefix}"
+                f"🎰 <b>РОЗЫГРЫШ ПРИЗА #1: Xiaomi Mi Band 11</b> ⌚️\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"🔄 Барабан крутится{spin_dots}\n"
+                f"   ▫️ {above}\n"
+                f"👉 🎯 [ <b>{current}</b> ] 🎯 👈\n"
+                f"   ▫️ {below}\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"🎟 Всего билетов в барабане: <b>{total_tickets}</b>"
+            )
+            try:
+                bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=frame_text,
+                    parse_mode="HTML"
+                )
+            except Exception as e:
+                if "message is not modified" not in str(e).lower():
+                    print(f"[DRUM R1 STEP ERROR]: {e}")
+
+        time.sleep(1.5)
+        winner_1 = random.choice(ticket_pool)
+        w1_uid, w1_name, w1_tickets = winner_1
+        safe_w1 = html.escape(w1_name)
+
+        r1_done_text = (
+            f"{mode_prefix}"
+            f"🎉 <b>ПРИЗ #1 (Xiaomi Mi Band 11) РАЗЫГРАН!</b> ⌚️\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"🏆 <b>Победитель #1:</b> <b>{safe_w1}</b> (билетов в барабане: {w1_tickets})!\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"⏳ <i>Готовим барабан для розыгрыша Приза #2...</i>"
+        )
+        try:
+            bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=r1_done_text,
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            print(f"[DRUM R1 WINNER ERROR]: {e}")
+
+        time.sleep(4.0)
+
+        # РАУНД 2: Приз #2 — второй Mi Band 11 (удаляем все билеты первого победителя строго по user_id)
+        pool_round_2 = [item for item in ticket_pool if item[0] != w1_uid]
+        random.shuffle(pool_round_2)
+
+        if pool_round_2:
+            total_tickets_r2 = len(pool_round_2)
+            for step_idx, delay in enumerate(delays):
+                time.sleep(delay)
+                above = html.escape(random.choice(pool_round_2)[1])
+                current = html.escape(random.choice(pool_round_2)[1])
+                below = html.escape(random.choice(pool_round_2)[1])
+                spin_dots = "." * ((step_idx % 3) + 1)
+
+                frame_r2_text = (
+                    f"{mode_prefix}"
+                    f"🥇 <b>Победитель #1:</b> {safe_w1} ({w1_tickets} бил.)\n\n"
+                    f"🎰 <b>РОЗЫГРЫШ ПРИЗА #2: Xiaomi Mi Band 11</b> ⌚️\n"
+                    f"━━━━━━━━━━━━━━\n"
+                    f"🔄 Барабан крутится{spin_dots}\n"
+                    f"   ▫️ {above}\n"
+                    f"👉 🎯 [ <b>{current}</b> ] 🎯 👈\n"
+                    f"   ▫️ {below}\n"
+                    f"━━━━━━━━━━━━━━\n"
+                    f"🎟 Оставшихся билетов в барабане: <b>{total_tickets_r2}</b>"
+                )
+                try:
+                    bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=message_id,
+                        text=frame_r2_text,
+                        parse_mode="HTML"
+                    )
+                except Exception as e:
+                    if "message is not modified" not in str(e).lower():
+                        print(f"[DRUM R2 STEP ERROR]: {e}")
+
+            time.sleep(1.5)
+            winner_2 = random.choice(pool_round_2)
+            w2_uid, w2_name, w2_tickets = winner_2
+            safe_w2 = html.escape(w2_name)
+            winner_2_line = f"🥇 <b>Победитель #2 (Mi Band 11):</b> <b>{safe_w2}</b> — {w2_tickets} билет(ов)"
+        else:
+            winner_2_line = "🥇 <b>Победитель #2 (Mi Band 11):</b> <i>В барабане был только 1 квалифицированный участник</i>"
+
+        final_title = (
+            "🧪 <b>ТЕСТОВЫЙ РОЗЫГРЫШ ЗАВЕРШЕН!</b> 🎊"
+            if is_test
+            else "🔥 <b>ИТОГИ МЕГА-РОЗЫГРЫША 2 ФИТНЕС-БРАСЛЕТОВ XIAOMI MI BAND 11!</b> 🎁⌚️"
+        )
+
+        final_text = (
+            f"{final_title}\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"🥇 <b>Победитель #1 (Mi Band 11):</b> <b>{safe_w1}</b> — {w1_tickets} билет(ов)\n"
+            f"{winner_2_line}\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"🎟 Всего участвовало билетов: <b>{total_tickets}</b>\n"
+            f"👥 Допущенных финалистов: <b>{len(participants)}</b>\n\n"
+            f"🥳 Поздравляем счастливчиков! Напишите администратору чата в личные сообщения для получения ваших призов! 🚀"
+        )
+
+        try:
+            bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=final_text,
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            print(f"[DRUM FINAL ERROR]: {e}")
+
+        if not is_test:
+            try:
+                bot.pin_chat_message(chat_id, message_id, disable_notification=False)
+            except Exception as e:
+                print(f"Ошибка закрепления финального сообщения розыгрыша: {e}")
+
+    except Exception as e:
+        print(f"Критическая ошибка в анимации барабана: {e}")
 
 def delete_later(chat_id, message_id):
     try:
@@ -1094,9 +1682,148 @@ def webhook():
         print(f"Ошибка разбора Update: {e}")
         return '!', 200
 
+    # Обработка вступлений и выходов участников в чате BREST_TALK_ID
+    if getattr(update, "chat_member", None):
+        cm = update.chat_member
+        if cm.chat and cm.chat.id == BREST_TALK_ID:
+            old_status = getattr(cm.old_chat_member, "status", "")
+            new_status = getattr(cm.new_chat_member, "status", "")
+            joined_user = getattr(cm.new_chat_member, "user", None)
+
+            if joined_user and not getattr(joined_user, "is_bot", False):
+                joined_uid_str = str(joined_user.id)
+
+                # Вступление в чат
+                if old_status in ['left', 'kicked'] and new_status in ['member', 'restricted', 'administrator', 'creator']:
+                    invite_obj = getattr(cm, "invite_link", None)
+                    invite_link_str = getattr(invite_obj, "invite_link", None) if invite_obj else None
+
+                    if invite_link_str:
+                        notify_payload = None
+                        with refs_lock:
+                            data = load_refs_data()
+                            inviter_id = data.get("links", {}).get(invite_link_str)
+
+                            if inviter_id and str(inviter_id) != joined_uid_str and inviter_id in data.get("users", {}):
+                                already_counted = any(
+                                    joined_uid_str in u_obj.get("referrals", [])
+                                    for u_obj in data["users"].values()
+                                )
+                                if not already_counted:
+                                    inviter_data = data["users"][inviter_id]
+                                    inviter_data["referrals"].append(joined_uid_str)
+                                    save_refs_data(data)
+                                    tickets = len(inviter_data["referrals"])
+                                    inviter_name = html.escape(inviter_data.get("name") or "Участник")
+                                    notify_payload = (inviter_name, tickets)
+
+                        if notify_payload:
+                            inviter_name, tickets = notify_payload
+                            if tickets < 3:
+                                pub_text = (
+                                    f"🎉 <b>{inviter_name}</b> пригласил(а) участника! "
+                                    f"У тебя уже <b>{tickets} билет(а) из 3</b> минимальных для входа в розыгрыш <b>Mi Band 11</b>! "
+                                    f"Хочешь увеличить шансы — увеличивай количество билетов! 🚀"
+                                )
+                            elif tickets == 3:
+                                pub_text = (
+                                    f"🔥 <b>{inviter_name}</b> пригласил(а) 3-го участника! "
+                                    f"У тебя уже <b>3 билета из 3</b> — ты проходишь в барабан розыгрыша <b>Mi Band 11</b>! 🎟 "
+                                    f"Хочешь увеличить шансы выигрыша — получай больше билетов! 🚀"
+                                )
+                            else:
+                                pub_text = (
+                                    f"⚡️ <b>{inviter_name}</b> пригласил(а) ещё одного участника! "
+                                    f"У тебя уже <b>{tickets} билетов</b> в барабане <b>Mi Band 11</b>! "
+                                    f"Шансы на победу растут! 🏆"
+                                )
+
+                            bot_info = get_bot_info()
+                            bot_username = bot_info.username if (bot_info and bot_info.username) else ""
+                            pub_markup = telebot.types.InlineKeyboardMarkup()
+                            if bot_username:
+                                pub_markup.add(
+                                    telebot.types.InlineKeyboardButton(
+                                        text="🎁 Получить свою ссылку для розыгрыша",
+                                        url=f"https://t.me/{bot_username}?start=ref"
+                                    )
+                                )
+                            try:
+                                bot.send_message(
+                                    BREST_TALK_ID,
+                                    pub_text,
+                                    reply_markup=pub_markup if bot_username else None,
+                                    parse_mode="HTML"
+                                )
+                            except Exception as e:
+                                print(f"Ошибка отправки реферального уведомления в чат: {e}")
+
+                # Выход или удаление из чата
+                elif new_status in ['left', 'kicked']:
+                    with refs_lock:
+                        data = load_refs_data()
+                        modified = False
+                        for u_obj in data.get("users", {}).values():
+                            if joined_uid_str in u_obj.get("referrals", []):
+                                u_obj["referrals"] = [
+                                    r for r in u_obj["referrals"] if r != joined_uid_str
+                                ]
+                                modified = True
+                        if modified:
+                            save_refs_data(data)
+        return '!', 200
+
     if update.callback_query:
         cq = update.callback_query
         data = cq.data or ""
+
+        if data == "refresh_ref_stats":
+            if cq.message and cq.from_user:
+                send_or_edit_ref_cabinet(
+                    chat_id=cq.message.chat.id,
+                    user=cq.from_user,
+                    edit_msg_id=cq.message.message_id,
+                    callback_query_id=cq.id
+                )
+            return '!', 200
+
+        if data in ("run_live_drum", "run_test_drum"):
+            if cq.from_user.id != ADMIN_ID:
+                try:
+                    bot.answer_callback_query(cq.id, "Запускать барабан может только администратор!", show_alert=True)
+                except Exception:
+                    pass
+                return '!', 200
+
+            try:
+                bot.answer_callback_query(cq.id, "🎰 Запускаем барабан!", show_alert=False)
+            except Exception:
+                pass
+
+            if data == "run_test_drum":
+                demo_participants = [
+                    {"user_id": "demo_1", "name": "Андрей (@andrey_brest)", "tickets": 3},
+                    {"user_id": "demo_2", "name": "Максим (@max_power)", "tickets": 7},
+                    {"user_id": "demo_3", "name": "Елена (@helen_art)", "tickets": 5},
+                    {"user_id": "demo_4", "name": "Дмитрий (@dmitry_k)", "tickets": 4}
+                ]
+                Thread(
+                    target=run_drum_animation_thread,
+                    args=(cq.message.chat.id, cq.message.message_id, demo_participants, True),
+                    daemon=True
+                ).start()
+            else:
+                def _verify_and_spin(c_id, m_id):
+                    qualified, _ = verify_and_build_giveaway_pool()
+                    run_drum_animation_thread(c_id, m_id, qualified, False)
+
+                Thread(
+                    target=_verify_and_spin,
+                    args=(cq.message.chat.id, cq.message.message_id),
+                    daemon=True
+                ).start()
+            return '!', 200
+
         if data == "lobby_join":
             with lobby_lock:
                 if not QUIZ_LOBBY["is_collecting"]:
@@ -1214,7 +1941,87 @@ def webhook():
         user_id = msg.from_user.id if msg.from_user else None
         user_text = msg.caption or msg.text or ""
 
-        cmd_clean = user_text.strip().lower().split('@')[0]
+        # Фиксация активности любого пользователя в чате BREST_TALK_ID
+        if chat_id == BREST_TALK_ID and msg.from_user:
+            mark_user_active_in_brest_talk(msg.from_user)
+
+        cmd_token = user_text.strip().split()[0].lower() if user_text.strip() else ""
+        cmd_clean = cmd_token.split('@')[0]
+
+        # Команды управления розыгрышем для ADMIN_ID (выполняются в фоновых потоках во избежание таймаута вебхука)
+        if user_id == ADMIN_ID and cmd_clean in ['/ref_top', '!рефтоп']:
+            try:
+                status_msg = bot.send_message(
+                    chat_id,
+                    "⏳ <b>Проверяю актуальный состав участников и присутствие друзей в чате...</b>",
+                    parse_mode="HTML"
+                )
+                Thread(
+                    target=process_ref_top_async,
+                    args=(chat_id, status_msg.message_id),
+                    daemon=True
+                ).start()
+            except Exception as e:
+                print(f"Ошибка запуска /ref_top: {e}")
+            return '!', 200
+
+        if user_id == ADMIN_ID and cmd_clean == '/start_giveaway':
+            try:
+                bot.delete_message(chat_id, msg.message_id)
+            except Exception:
+                pass
+
+            try:
+                status_msg = bot.send_message(
+                    chat_id,
+                    "⏳ <b>Проверяю актуальный состав участников и присутствие друзей в чате...</b>",
+                    parse_mode="HTML"
+                )
+                Thread(
+                    target=process_start_giveaway_async,
+                    args=(chat_id, status_msg.message_id),
+                    daemon=True
+                ).start()
+            except Exception as e:
+                print(f"Ошибка запуска /start_giveaway: {e}")
+            return '!', 200
+
+        if user_id == ADMIN_ID and cmd_clean == '/test_giveaway':
+            try:
+                bot.delete_message(chat_id, msg.message_id)
+            except Exception:
+                pass
+
+            demo_participants = [
+                {"user_id": "demo_1", "name": "Андрей (@andrey_brest)", "tickets": 3},
+                {"user_id": "demo_2", "name": "Максим (@max_power)", "tickets": 7},
+                {"user_id": "demo_3", "name": "Елена (@helen_art)", "tickets": 5},
+                {"user_id": "demo_4", "name": "Дмитрий (@dmitry_k)", "tickets": 4}
+            ]
+            total_demo_tickets = sum(p["tickets"] for p in demo_participants)
+            demo_lines = [
+                f"• <b>{html.escape(p['name'])}</b> — 🎟 <b>{p['tickets']}</b> билет(ов)"
+                for p in demo_participants
+            ]
+
+            test_preview_text = (
+                f"🧪 <b>[ТЕСТОВЫЙ РЕЖИМ] РЕПЕТИЦИЯ РОЗЫГРЫША 2 MI BAND 11</b> ⌚️\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"👥 <b>Демо-участники в барабане ({len(demo_participants)}):</b>\n"
+                + "\n".join(demo_lines)
+                + f"\n━━━━━━━━━━━━━━\n"
+                f"🎟 <b>Всего билетов в барабане:</b> {total_demo_tickets}\n\n"
+                f"👇 <i>Нажмите кнопку ниже для проверки живой анимации под запись экрана!</i>"
+            )
+            markup = telebot.types.InlineKeyboardMarkup()
+            markup.add(
+                telebot.types.InlineKeyboardButton(
+                    text="🧪 ТЕСТОВЫЙ ЗАПУСК БАРАБАНА",
+                    callback_data="run_test_drum"
+                )
+            )
+            bot.send_message(chat_id, test_preview_text, reply_markup=markup, parse_mode="HTML")
+            return '!', 200
 
         if user_id == ADMIN_ID and cmd_clean == '/stop_quiz':
             try:
@@ -1343,6 +2150,16 @@ def webhook():
             return '!', 200
 
         if chat_type == 'private':
+            raw_stripped = user_text.strip().lower()
+            is_ref_request = (
+                cmd_clean == '/ref'
+                or (cmd_clean == '/start' and user_id != ADMIN_ID)
+                or (raw_stripped.startswith('/start') and 'ref' in raw_stripped.split())
+            )
+            if is_ref_request and msg.from_user:
+                send_or_edit_ref_cabinet(chat_id, msg.from_user)
+                return '!', 200
+
             if user_id == ADMIN_ID:
                 if msg.text == '/start':
                     bot.send_message(chat_id, "Приветствую, шеф.")
@@ -1431,25 +2248,6 @@ def webhook():
                 thread.start()
                 return '!', 200
             else:
-                if cmd_clean == '/start':
-                    bot.send_message(
-                        chat_id,
-                        "Здравствуйте! Вы можете присылать сюда свои материалы, тексты, фото и идеи для канала «Калейдоскоп»."
-                    )
-                    return '!', 200
-
-                try:
-                    bot.forward_message(FORWARD_CHAT_ID, chat_id, msg.message_id)
-                except Exception:
-                    try:
-                        bot.copy_message(FORWARD_CHAT_ID, chat_id, msg.message_id)
-                    except Exception as e:
-                        print(f"Ошибка пересылки материала: {e}")
-
-                try:
-                    bot.send_message(chat_id, "Спасибо! Ваш материал принят на рассмотрение редакции.")
-                except Exception as e:
-                    print(f"Ошибка отправки подтверждения: {e}")
                 return '!', 200
 
         if chat_type in ['group', 'supergroup', 'channel']:
@@ -1522,5 +2320,8 @@ if __name__ == "__main__":
     if render_url and TOKEN:
         bot.remove_webhook()
         time.sleep(0.5)
-        bot.set_webhook(url=f"{render_url}/{TOKEN}")
+        bot.set_webhook(
+            url=f"{render_url}/{TOKEN}",
+            allowed_updates=["message", "callback_query", "chat_member"]
+        )
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)), threaded=True)
