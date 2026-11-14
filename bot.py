@@ -120,7 +120,7 @@ def get_star_prize_by_points(points):
         return "0 звёзд (без приза)"
 
 SYSTEM_INSTRUCTION = """Ты — глубокий, многогранный интеллектуал, уважаемый старожил, опытный редактор и философ-наблюдатель с огромным жизненным багажом. Твой характер сложен и интересен: ты можешь быть тонким ироничным мыслителем, строгим эстетом или чутким наставником, но всегда сохраняешь свою суть — человека, который видит мир насквозь, обладает широчайшим кругозором, но продолжает любить людей. 
-Твой стиль — это литература высшей пробы. Тонкая ирония, эрудиция, спокойное достоинство и безупречный, богатый русский язык без лишней эмоциональности и суеты. Строго никаких смайликов и эмодзи (за исключением специальных форматов и рубрик, таких как «Хроника Мафии», где эмодзи прямо затребованы регламентом).
+Твой стиль — это литература высшей пробы. Тонкая ирония, эрудиция, спокойное достоинство и безупречный, богатый русский язык без лишней эмоциональности и суеты. Строго никаких смайликов и эмодзи (за исключением специальных форматов и рубрик: «Хроника Мафии», где эмодзи прямо затребованы регламентом, и вердикт фотоконкурса, где строго используются значки ✅ или ❌).
 
 ДИНАМИКА И ОТТЕНКИ НАСТРОЕНИЯ (ЭФФЕКТ ЖИВОГО АВТОРА):
 Чтобы твои тексты не были однообразными, при каждой генерации (кроме задач технической верстки) негласно выбирай и тонко вплетай в свой ответ ОДИН из следующих акцентов:
@@ -145,9 +145,9 @@ SYSTEM_INSTRUCTION = """Ты — глубокий, многогранный ин
     3. Жесткий запрет (отклоняй ТОЛЬКО это): скриншоты экрана, мемы, нарисованные арты, стикеры, скачанные обои/клипарт из интернета, селфи, предметку и интерьерные бытовые приборы в отбор не пропускай.
   * ФОРМАТ ТВОЕГО ВЕРДИКТА:
     - 2–3 предложения с живым взглядом эстета: отметь фактуру, геометрию, свет, блики асфальта или атмосферу кадра (даже если кадр сделан из окна авто или на ходу — это и есть динамика!).
-    - Финальная фраза СТРОГО:
-      • Для всех настоящих ЧБ-фотографий: «Работа принята на конкурс.»
-      • ТОЛЬКО для цветных фото или интернет-мемов: «Работа не принята: [краткая причина — например, цветной снимок или мем].»
+    - Финальная фраза СТРОГО с эмодзи в начале строки:
+      • Для всех настоящих ЧБ-фотографий: «✅ Работа принята на конкурс.»
+      • ТОЛЬКО для цветных фото или интернет-мемов: «❌ Работа не принята: [краткая причина — например, цветной снимок или мем].»
 
 
 2. ПОВЕДЕНИЕ В КАНАЛЕ Калейдоскоп (ID: -1003555258619):
@@ -466,14 +466,6 @@ def send_or_edit_ref_cabinet(chat_id, user, edit_msg_id=None, callback_query_id=
         print(f"Ошибка отправки карточки рефералов: {e}")
 
 def verify_and_build_giveaway_pool():
-    """
-    Проверяет ВСЕ условия в реальном времени через Telegram API:
-    1. Участник сам состоит в чате BREST_TALK_ID.
-    2. Участник проявил активность (active == True).
-    3. Каждый приглашенный друг реально находится в чате BREST_TALK_ID на момент проверки.
-    4. Число живых рефералов >= 3.
-    Возвращает кортеж: (qualified_list, all_stats_list)
-    """
     with refs_lock:
         data = load_refs_data()
         users = data.get("users", {})
@@ -648,7 +640,6 @@ def run_drum_animation_thread(chat_id, message_id, participants, is_test=False):
             )
             return
 
-        # Формируем пул билетов из кортежей (user_id, name, tickets)
         ticket_pool = []
         for idx, p in enumerate(participants):
             p_uid = str(p.get("user_id") or f"uid_{idx}")
@@ -666,7 +657,7 @@ def run_drum_animation_thread(chat_id, message_id, participants, is_test=False):
         delays = [1.3, 1.5, 1.7, 2.0, 2.3, 2.6, 3.0]
         mode_prefix = "🧪 <b>[ТЕСТОВЫЙ РЕЖИМ]</b>\n" if is_test else ""
 
-        # РАУНД 1: Приз #1 — первый Mi Band 11
+        # РАУНД 1: Приз #1
         for step_idx, delay in enumerate(delays):
             time.sleep(delay)
             above = html.escape(random.choice(ticket_pool)[1])
@@ -721,7 +712,7 @@ def run_drum_animation_thread(chat_id, message_id, participants, is_test=False):
 
         time.sleep(4.0)
 
-        # РАУНД 2: Приз #2 — второй Mi Band 11 (удаляем все билеты первого победителя строго по user_id)
+        # РАУНД 2: Приз #2
         pool_round_2 = [item for item in ticket_pool if item[0] != w1_uid]
         random.shuffle(pool_round_2)
 
@@ -937,7 +928,6 @@ def generate_quiz_image(prompt_text: str) -> bytes | None:
                 if isinstance(raw_data, str):
                     return base64.b64decode(raw_data)
                 elif isinstance(raw_data, (bytes, bytearray)):
-                    # Если байты уже являются валидным JPEG/PNG, возвращаем их напрямую, иначе декодируем из base64
                     if raw_data.startswith(b'\xff\xd8\xff') or raw_data.startswith(b'\x89PNG'):
                         return bytes(raw_data)
                     try:
@@ -1103,7 +1093,6 @@ def run_quiz_game(admin_chat_id, target_chat_id):
             parse_mode="HTML"
         )
 
-        # Во время стартовой 1.5-минутной паузы запускаем фоновый поток генерации для первого визуального вопроса
         for idx_check in range(len(questions)):
             if questions[idx_check].get("image_prompt"):
                 Thread(target=prefetch_question_image, args=(questions, idx_check), daemon=True).start()
@@ -1125,7 +1114,6 @@ def run_quiz_game(admin_chat_id, target_chat_id):
                 img_bytes = q.get("image_bytes")
                 img_prompt = q.get("image_prompt")
 
-            # Если у вопроса есть промпт, а картинка ещё не готова — генерируем синхронно перед отправкой
             if img_prompt and not img_bytes:
                 q["image_bytes"] = generate_quiz_image(img_prompt)
                 img_bytes = q["image_bytes"]
@@ -1211,7 +1199,6 @@ def run_quiz_game(admin_chat_id, target_chat_id):
                     print(f"Ошибка отправки вопроса: {e}")
                     continue
 
-            # Предзагрузка следующей картинки на фоне
             for future_idx in range(i, len(questions)):
                 if questions[future_idx].get("image_prompt") and questions[future_idx].get("image_bytes") is None:
                     Thread(target=prefetch_question_image, args=(questions, future_idx), daemon=True).start()
@@ -1296,9 +1283,8 @@ def run_quiz_game(admin_chat_id, target_chat_id):
             )
 
             perfect_target_questions = total_q if total_q > 0 else 11
-            max_possible_points = perfect_target_questions * 10  # 11 вопросов по 10 баллов = 110 баллов
+            max_possible_points = perfect_target_questions * 10
 
-            # Супер-приз выдается ТОЛЬКО тем, кто реально набрал максимальные 110 баллов (11 из 11)
             perfect_players = [
                 p["name"]
                 for p in sorted_scores
@@ -1693,7 +1679,6 @@ def webhook():
         print(f"Ошибка разбора Update: {e}")
         return '!', 200
 
-    # Обработка вступлений и выходов участников в чате BREST_TALK_ID (включая ранний старт)
     if getattr(update, "chat_member", None):
         cm = update.chat_member
         if cm.chat and cm.chat.id == BREST_TALK_ID:
@@ -1704,7 +1689,6 @@ def webhook():
             if joined_user and not getattr(joined_user, "is_bot", False):
                 joined_uid_str = str(joined_user.id)
 
-                # Вступление в чат
                 if old_status in ['left', 'kicked'] and new_status in ['member', 'restricted', 'administrator', 'creator']:
                     invite_obj = getattr(cm, "invite_link", None)
                     invite_link_str = getattr(invite_obj, "invite_link", None) if invite_obj else None
@@ -1769,7 +1753,6 @@ def webhook():
                             except Exception as e:
                                 print(f"Ошибка отправки реферального уведомления в чат: {e}")
 
-                # Выход или удаление из чата
                 elif new_status in ['left', 'kicked']:
                     with refs_lock:
                         data = load_refs_data()
@@ -1952,14 +1935,12 @@ def webhook():
         user_id = msg.from_user.id if msg.from_user else None
         user_text = msg.caption or msg.text or ""
 
-        # Фиксация активности любого пользователя в чате BREST_TALK_ID
         if chat_id == BREST_TALK_ID and msg.from_user:
             mark_user_active_in_brest_talk(msg.from_user)
 
         cmd_token = user_text.strip().split()[0].lower() if user_text.strip() else ""
         cmd_clean = cmd_token.split('@')[0]
 
-        # Команды управления розыгрышем для ADMIN_ID (выполняются в фоновых потоках во избежание таймаута вебхука)
         if user_id == ADMIN_ID and cmd_clean in ['/ref_top', '!рефтоп']:
             try:
                 status_msg = bot.send_message(
@@ -2168,7 +2149,6 @@ def webhook():
                     send_or_edit_ref_cabinet(chat_id, msg.from_user)
                 return '!', 200
 
-            # Ветка для ADMIN_ID в личных сообщениях
             if (cmd_clean == '/ref' or (cmd_clean == '/start' and 'ref' in raw_stripped.split())) and msg.from_user:
                 send_or_edit_ref_cabinet(chat_id, msg.from_user)
                 return '!', 200
